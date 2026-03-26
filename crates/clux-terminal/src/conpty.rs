@@ -1,8 +1,7 @@
-use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
-use std::thread;
 use std::time::Duration;
+use std::{io, thread};
 
 use crossbeam_channel::{Receiver, Sender, bounded};
 use tracing::{debug, info, warn};
