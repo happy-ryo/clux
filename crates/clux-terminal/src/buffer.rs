@@ -39,6 +39,11 @@ pub struct Cell {
     pub fg: Color,
     pub bg: Color,
     pub attrs: CellAttrs,
+    /// True if this cell is the second half of a wide (CJK) character.
+    /// The actual character is in the previous cell.
+    pub wide_continuation: bool,
+    /// True if this cell contains a wide character (occupies 2 columns).
+    pub is_wide: bool,
 }
 
 impl Default for Cell {
@@ -48,6 +53,8 @@ impl Default for Cell {
             fg: Color::white(),
             bg: Color::black(),
             attrs: CellAttrs::default(),
+            wide_continuation: false,
+            is_wide: false,
         }
     }
 }
@@ -176,26 +183,62 @@ impl TerminalBuffer {
     }
 
     pub fn put_char(&mut self, c: char) {
-        if self.cursor.col < self.cols && self.cursor.row < self.rows {
-            if self.insert_mode {
-                // Shift characters right from cursor position
-                let row = self.cursor.row;
-                let col = self.cursor.col;
-                // Remove last cell, insert a blank at cursor position
-                self.cells[row].pop();
-                self.cells[row].insert(col, Cell::default());
-            }
+        use unicode_width::UnicodeWidthChar;
+
+        if self.cursor.col >= self.cols || self.cursor.row >= self.rows {
+            return;
+        }
+
+        let char_width = c.width().unwrap_or(1);
+        let is_wide = char_width >= 2;
+
+        // If wide char won't fit on this line, wrap first
+        if is_wide && self.cursor.col + 1 >= self.cols {
+            // Fill current cell with space and wrap
+            self.cells[self.cursor.row][self.cursor.col] = Cell::default();
+            self.cursor.col = 0;
+            self.newline();
+        }
+
+        if self.cursor.col >= self.cols || self.cursor.row >= self.rows {
+            return;
+        }
+
+        if self.insert_mode {
+            let row = self.cursor.row;
+            let col = self.cursor.col;
+            self.cells[row].pop();
+            self.cells[row].insert(col, Cell::default());
+        }
+
+        // Clear any wide continuation marker at current position
+        self.cells[self.cursor.row][self.cursor.col] = Cell {
+            c,
+            fg: self.current_fg,
+            bg: self.current_bg,
+            attrs: self.current_attrs,
+            wide_continuation: false,
+            is_wide,
+        };
+
+        self.cursor.col += 1;
+
+        // For wide characters, mark the next cell as continuation
+        if is_wide && self.cursor.col < self.cols {
             self.cells[self.cursor.row][self.cursor.col] = Cell {
-                c,
+                c: ' ',
                 fg: self.current_fg,
                 bg: self.current_bg,
                 attrs: self.current_attrs,
+                wide_continuation: true,
+                is_wide: false,
             };
             self.cursor.col += 1;
-            if self.cursor.col >= self.cols {
-                self.cursor.col = 0;
-                self.newline();
-            }
+        }
+
+        if self.cursor.col >= self.cols {
+            self.cursor.col = 0;
+            self.newline();
         }
     }
 

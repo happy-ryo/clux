@@ -544,8 +544,16 @@ impl App {
                         )
                     };
 
+                    // Skip continuation cells (second half of wide chars)
+                    if cell.wide_continuation {
+                        continue;
+                    }
+
+                    // Wide characters span 2 cell widths
+                    let render_w = if cell.is_wide { cell_w * 2.0 } else { cell_w };
+
                     instances.push(CellInstance::background(
-                        px, py, cell_w, cell_h, bg_r, bg_g, bg_b,
+                        px, py, render_w, cell_h, bg_r, bg_g, bg_b,
                     ));
 
                     if cell.c != ' ' {
