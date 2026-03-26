@@ -5,11 +5,13 @@ use tracing::info;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
 
 use clux_renderer::pipeline::RenderPipeline;
 use clux_terminal::buffer::TerminalBuffer;
 use clux_terminal::conpty::ConPty;
+use clux_terminal::input::key_event_to_bytes;
 use clux_terminal::resize::ResizeDebouncer;
 use clux_terminal::terminal_size::{
     DEFAULT_CELL_HEIGHT, DEFAULT_CELL_WIDTH, pixel_size_to_terminal_size,
@@ -31,6 +33,7 @@ struct App {
     cell_height: f32,
     /// Current DPI scale factor from the OS.
     scale_factor: f64,
+    modifiers: ModifiersState,
 }
 
 impl App {
@@ -45,6 +48,7 @@ impl App {
             cell_width: DEFAULT_CELL_WIDTH,
             cell_height: DEFAULT_CELL_HEIGHT,
             scale_factor: 1.0,
+            modifiers: ModifiersState::empty(),
         }
     }
 
@@ -182,12 +186,20 @@ impl ApplicationHandler for App {
                 // Request continuous redraws for terminal output
                 self.request_redraw();
             }
+            WindowEvent::ModifiersChanged(new_modifiers) => {
+                self.modifiers = new_modifiers.state();
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state == winit::event::ElementState::Pressed
-                    && let Some(ref text) = event.text
                     && let Some(ref terminal) = self.terminal
                 {
-                    terminal.write(text.as_bytes());
+                    // Try special-key / modifier mapping first
+                    if let Some(bytes) = key_event_to_bytes(&event, self.modifiers) {
+                        terminal.write(&bytes);
+                    } else if let Some(ref text) = event.text {
+                        // Fall back to plain text input
+                        terminal.write(text.as_bytes());
+                    }
                 }
             }
             _ => {}
