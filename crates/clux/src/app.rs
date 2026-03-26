@@ -544,6 +544,7 @@ impl App {
         Self::resolve_glyphs(
             self.renderer.as_mut().expect("checked above"),
             &glyph_requests,
+            cell_w,
             cell_h,
             &mut instances,
         );
@@ -654,6 +655,7 @@ impl App {
         Self::resolve_glyphs(
             self.renderer.as_mut().expect("checked above"),
             &glyph_requests,
+            cell_w,
             cell_h,
             &mut instances,
         );
@@ -662,9 +664,11 @@ impl App {
     }
 
     /// Resolve glyph atlas lookups and append foreground instances.
+    /// Glyphs are clamped to cell boundaries to prevent overflow.
     fn resolve_glyphs(
         renderer: &mut RenderPipeline,
         requests: &[GlyphRequest],
+        cell_w: f32,
         cell_h: f32,
         instances: &mut Vec<CellInstance>,
     ) {
@@ -674,19 +678,26 @@ impl App {
                 && glyph.width > 0
                 && glyph.height > 0
             {
-                instances.push(CellInstance::glyph(
-                    req.px + glyph.offset_x as f32,
-                    req.py + (cell_h - glyph.offset_y as f32),
-                    glyph.width as f32,
-                    glyph.height as f32,
-                    req.fg_r,
-                    req.fg_g,
-                    req.fg_b,
-                    glyph.u,
-                    glyph.v,
-                    glyph.uv_w,
-                    glyph.uv_h,
-                ));
+                // Clamp glyph to fit within the cell boundary
+                let gx = req.px + glyph.offset_x as f32;
+                let gy = req.py + (cell_h - glyph.offset_y as f32);
+                let gw = (glyph.width as f32).min(cell_w - glyph.offset_x as f32);
+                let gh = glyph.height as f32;
+
+                // Only render if the glyph has positive dimensions after clamping
+                if gw > 0.0 && gh > 0.0 {
+                    // Adjust UV if we clamped the width
+                    let uv_w = if gw < glyph.width as f32 {
+                        glyph.uv_w * (gw / glyph.width as f32)
+                    } else {
+                        glyph.uv_w
+                    };
+
+                    instances.push(CellInstance::glyph(
+                        gx, gy, gw, gh, req.fg_r, req.fg_g, req.fg_b, glyph.u, glyph.v, uv_w,
+                        glyph.uv_h,
+                    ));
+                }
             }
         }
     }
