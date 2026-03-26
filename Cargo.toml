@@ -80,6 +80,9 @@ axum = "0.8"
 # Database
 rusqlite = { version = "0.33", features = ["bundled"] }
 
+# Unicode
+unicode-width = "0.2"
+
 # Error handling
 anyhow = "1"
 thiserror = "2"
