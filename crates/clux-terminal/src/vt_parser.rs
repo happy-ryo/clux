@@ -208,6 +208,19 @@ impl Perform for VtHandler<'_> {
                 // DECRC - Restore Cursor
                 self.buffer.restore_cursor();
             }
+            b'D' => {
+                // IND - Index (move cursor down, scroll if at bottom of scroll region)
+                self.buffer.index();
+            }
+            b'E' => {
+                // NEL - Next Line (carriage return + index)
+                self.buffer.carriage_return();
+                self.buffer.index();
+            }
+            b'M' => {
+                // RI - Reverse Index (move cursor up, scroll down if at top of scroll region)
+                self.buffer.reverse_index();
+            }
             b'H' => {
                 // HTS - Set Tab Stop at current position
                 self.buffer.set_tab_stop();
@@ -317,6 +330,10 @@ impl VtHandler<'_> {
                     // Disable alternate screen buffer
                     self.buffer.exit_alternate_screen();
                     self.buffer.restore_cursor();
+                }
+                (1 | 7 | 12 | 2004, 'h' | 'l') => {
+                    // DECCKM (1), DECAWM (7), att610 blink (12), bracketed paste (2004)
+                    // Handled at input layer or cosmetic only
                 }
                 (25, 'h') => {
                     // DECTCEM - Show cursor

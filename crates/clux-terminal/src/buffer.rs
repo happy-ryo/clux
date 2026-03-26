@@ -211,6 +211,26 @@ impl TerminalBuffer {
         self.cursor.col = 0;
     }
 
+    /// Index: move cursor down one line. If at the bottom of the scroll region,
+    /// scroll the region up. If below the scroll region, just move down.
+    pub fn index(&mut self) {
+        if self.cursor.row == self.scroll_bottom {
+            self.scroll_up();
+        } else if self.cursor.row + 1 < self.rows {
+            self.cursor.row += 1;
+        }
+    }
+
+    /// Reverse Index: move cursor up one line. If at the top of the scroll region,
+    /// scroll the region down. If above the scroll region, just move up.
+    pub fn reverse_index(&mut self) {
+        if self.cursor.row == self.scroll_top {
+            self.scroll_down();
+        } else if self.cursor.row > 0 {
+            self.cursor.row -= 1;
+        }
+    }
+
     pub fn backspace(&mut self) {
         if self.cursor.col > 0 {
             self.cursor.col -= 1;
