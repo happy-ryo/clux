@@ -54,6 +54,7 @@ impl Perform for VtHandler<'_> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
         let params: Vec<u16> = params.iter().map(|p| p[0]).collect();
 
@@ -83,6 +84,24 @@ impl Perform for VtHandler<'_> {
                 // Cursor Back
                 let n = params.first().copied().unwrap_or(1).max(1) as usize;
                 self.buffer.cursor.col = self.buffer.cursor.col.saturating_sub(n);
+            }
+            'E' => {
+                // Cursor Next Line
+                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                self.buffer.cursor.row =
+                    (self.buffer.cursor.row + n).min(self.buffer.rows.saturating_sub(1));
+                self.buffer.cursor.col = 0;
+            }
+            'F' => {
+                // Cursor Previous Line
+                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                self.buffer.cursor.row = self.buffer.cursor.row.saturating_sub(n);
+                self.buffer.cursor.col = 0;
+            }
+            'G' => {
+                // CHA - Cursor Horizontal Absolute (1-based)
+                let col = params.first().copied().unwrap_or(1).max(1) as usize - 1;
+                self.buffer.cursor.col = col.min(self.buffer.cols.saturating_sub(1));
             }
             'H' | 'f' => {
                 // Cursor Position
@@ -128,6 +147,30 @@ impl Perform for VtHandler<'_> {
                     3 => self.buffer.clear_all_tab_stops(),
                     _ => {}
                 }
+            }
+            'd' => {
+                // VPA - Line Position Absolute (1-based)
+                let row = params.first().copied().unwrap_or(1).max(1) as usize - 1;
+                self.buffer.cursor.row = row.min(self.buffer.rows.saturating_sub(1));
+            }
+            'S' => {
+                // Scroll Up - scroll content up by n lines
+                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                for _ in 0..n {
+                    self.buffer.scroll_up();
+                }
+            }
+            'T' => {
+                // Scroll Down - scroll content down by n lines
+                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                for _ in 0..n {
+                    self.buffer.scroll_down();
+                }
+            }
+            'X' => {
+                // ECH - Erase Character
+                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                self.buffer.erase_chars(n);
             }
             'r' => {
                 // DECSTBM - Set Scroll Region
@@ -274,6 +317,14 @@ impl VtHandler<'_> {
                     // Disable alternate screen buffer
                     self.buffer.exit_alternate_screen();
                     self.buffer.restore_cursor();
+                }
+                (25, 'h') => {
+                    // DECTCEM - Show cursor
+                    self.buffer.cursor_visible = true;
+                }
+                (25, 'l') => {
+                    // DECTCEM - Hide cursor
+                    self.buffer.cursor_visible = false;
                 }
                 (4, 'h') => {
                     // Insert mode on

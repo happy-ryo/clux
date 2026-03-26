@@ -122,6 +122,9 @@ pub struct TerminalBuffer {
     /// Current scroll offset (0 = at the bottom / live view).
     /// Positive values scroll back into history.
     pub scroll_offset: usize,
+
+    /// Whether the cursor should be displayed (DECTCEM).
+    pub cursor_visible: bool,
 }
 
 impl TerminalBuffer {
@@ -150,6 +153,7 @@ impl TerminalBuffer {
             tab_stops,
             title: String::new(),
             scroll_offset: 0,
+            cursor_visible: true,
         }
     }
 
@@ -216,7 +220,7 @@ impl TerminalBuffer {
     /// Scroll the scroll region up by one line.
     /// The top line of the region is moved to scrollback (if in main screen and region is full
     /// screen) and a blank line is inserted at the bottom of the region.
-    fn scroll_up(&mut self) {
+    pub fn scroll_up(&mut self) {
         let top = self.scroll_top;
         let bottom = self.scroll_bottom;
 
@@ -236,12 +240,24 @@ impl TerminalBuffer {
 
     /// Scroll the scroll region down by one line.
     /// A blank line is inserted at the top of the region and the bottom line is removed.
-    #[expect(dead_code, reason = "will be used by reverse index (RI) in future")]
-    fn scroll_down(&mut self) {
+    pub fn scroll_down(&mut self) {
         let top = self.scroll_top;
         let bottom = self.scroll_bottom;
         self.cells.remove(bottom);
         self.cells.insert(top, vec![Cell::default(); self.cols]);
+    }
+
+    /// Erase `n` characters starting at the cursor position (ECH).
+    /// Does not move the cursor.
+    pub fn erase_chars(&mut self, n: usize) {
+        let row = self.cursor.row;
+        let col = self.cursor.col;
+        if row < self.rows {
+            let end = (col + n).min(self.cols);
+            for c in col..end {
+                self.cells[row][c] = Cell::default();
+            }
+        }
     }
 
     pub fn clear_screen(&mut self) {

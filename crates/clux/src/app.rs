@@ -505,7 +505,10 @@ impl App {
             let cursor_row = pane.buffer.cursor.row;
             let is_active = *pane_id == active_pane_id;
             // Only show cursor when at live view (not scrolled back)
-            let show_cursor = is_active && pane.buffer.scroll_offset == 0 && self.cursor_visible;
+            let show_cursor = is_active
+                && pane.buffer.scroll_offset == 0
+                && pane.buffer.cursor_visible
+                && self.cursor_visible;
 
             let visible = pane.buffer.visible_lines();
             for (row_idx, row) in visible.iter().enumerate() {
