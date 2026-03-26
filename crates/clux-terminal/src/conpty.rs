@@ -11,7 +11,7 @@ use windows::Win32::System::Console::{
 };
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::{
-    CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
+    CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
     EXTENDED_STARTUPINFO_PRESENT, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
     PROCESS_INFORMATION, STARTUPINFOEXW, UpdateProcThreadAttribute,
 };
@@ -318,7 +318,7 @@ unsafe fn spawn_process(console: HPCON, shell: &str) -> Result<PROCESS_INFORMATI
             None,
             None,
             false,
-            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
             None,
             None,
             &raw const startup_info.StartupInfo,
