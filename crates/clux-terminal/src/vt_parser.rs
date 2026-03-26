@@ -112,6 +112,7 @@ impl Perform for VtHandler<'_> {
             'J' => {
                 // Erase in Display
                 let mode = params.first().copied().unwrap_or(0);
+                tracing::debug!(mode, "Erase in Display (CSI J)");
                 self.buffer.erase_in_display(mode);
             }
             'K' => {
@@ -365,11 +366,13 @@ impl VtHandler<'_> {
                 }
                 (1049, 'h') => {
                     // Enable alternate screen buffer (with save/restore cursor)
+                    tracing::info!("Entering alternate screen (DEC 1049)");
                     self.buffer.save_cursor();
                     self.buffer.enter_alternate_screen();
                 }
                 (1049, 'l') => {
                     // Disable alternate screen buffer
+                    tracing::info!("Leaving alternate screen (DEC 1049)");
                     self.buffer.exit_alternate_screen();
                     self.buffer.restore_cursor();
                 }

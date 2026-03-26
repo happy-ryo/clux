@@ -368,7 +368,19 @@ impl App {
         // Inject MCP config for newly detected Claude Code panes
         for pane_id in newly_detected {
             if let Some(pane) = self.panes.get_mut(&pane_id) {
-                // Try to inject MCP config using home directory as fallback
+                // ConPTY absorbs ESC[?1049h (alternate screen) internally even in
+                // PASSTHROUGH_MODE, so our buffer still has the old shell content.
+                // Clear the buffer when Claude Code is detected to start fresh.
+                info!(
+                    pane_id,
+                    "Clearing buffer for Claude Code (ConPTY ate alternate screen)"
+                );
+                pane.buffer.cells =
+                    vec![
+                        vec![clux_terminal::buffer::Cell::default(); pane.buffer.cols];
+                        pane.buffer.rows
+                    ];
+
                 match clux_coord::detect::inject_mcp_config(None, MCP_DEFAULT_PORT) {
                     Ok(path) => {
                         info!(pane_id, ?path, "Injected MCP config for Claude Code");
