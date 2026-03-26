@@ -116,6 +116,12 @@ impl RenderPipeline {
         DEFAULT_FONT_SIZE
     }
 
+    /// Measure actual cell dimensions from the font.
+    /// Returns `(cell_width, cell_height)` in logical pixels.
+    pub fn measure_cell_size(&mut self) -> (f32, f32) {
+        self.glyph_atlas.measure_cell_size(DEFAULT_FONT_SIZE)
+    }
+
     /// Access the device (needed for atlas operations from app code).
     pub fn device(&self) -> &wgpu::Device {
         &self.device

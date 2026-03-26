@@ -93,6 +93,34 @@ impl GlyphAtlas {
         atlas
     }
 
+    /// Measure the cell dimensions for a monospace grid based on actual font metrics.
+    /// Returns `(cell_width, cell_height)` in logical pixels.
+    pub fn measure_cell_size(&mut self, font_size: f32) -> (f32, f32) {
+        let metrics = Metrics::new(font_size, font_size * 1.2);
+        let attrs = Attrs::new();
+
+        // Measure a representative character ('M' is typically full-width in monospace)
+        let mut buffer = Buffer::new(&mut self.font_system, metrics);
+        buffer.set_text(&mut self.font_system, "M", attrs, Shaping::Advanced);
+        buffer.shape_until_scroll(&mut self.font_system, false);
+
+        let mut cell_width = font_size * 0.6; // fallback
+        let cell_height = metrics.line_height;
+
+        for run in buffer.layout_runs() {
+            if let Some(glyph) = run.glyphs.first() {
+                cell_width = glyph.w;
+                break;
+            }
+        }
+
+        debug!(
+            cell_width,
+            cell_height, font_size, "Measured cell size from font metrics"
+        );
+        (cell_width, cell_height)
+    }
+
     fn prepopulate_ascii(&mut self, queue: &wgpu::Queue, font_size: f32) {
         let mut count = 0u32;
         for c in ' '..='~' {
