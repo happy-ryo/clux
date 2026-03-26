@@ -13,3 +13,4 @@ winit.workspace = true
 cosmic-text.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
+bytemuck.workspace = true
