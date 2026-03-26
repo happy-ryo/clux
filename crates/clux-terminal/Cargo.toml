@@ -14,3 +14,4 @@ crossbeam-channel.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
+winit.workspace = true
