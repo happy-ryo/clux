@@ -1,9 +1,17 @@
-Run all CI lint checks (clippy, fmt, deny) on the workspace.
+Lint/フォーマット/依存監査チェックを実行する。
 
-Steps:
-1. Run `cargo clippy --all-targets` and report any warnings
-2. Run `cargo fmt --check` and report any formatting issues
-3. Run `cargo deny check` and report any license/advisory issues
-4. Summarize: all passed or list failures
+## 手順
 
-Fix any issues found automatically where possible.
+1. `cargo fmt --check` でフォーマット確認
+   - 失敗 → 差分を表示し、「`cargo fmt` で修正しますか？」と確認
+2. `cargo clippy --all-targets -- -D warnings` でlint確認
+   - 失敗 → 警告一覧を表示し、「自動修正を試みますか？」と確認
+3. `cargo deny check` で依存監査
+   - 失敗 → ライセンス/セキュリティ問題を報告
+
+結果サマリー:
+```
+Lint Results: fmt ✓/✗ | clippy ✓/✗ | deny ✓/✗
+```
+
+「修正して」と言われたら、自動修正可能なものを全て修正する。

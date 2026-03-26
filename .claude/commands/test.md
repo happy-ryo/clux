@@ -1,6 +1,11 @@
-Run all tests in the clux workspace.
+cluxワークスペースの全テストを実行する。
 
-Steps:
-1. Run `cargo test --all`
-2. Report test results: passed, failed, or skipped
-3. If any tests fail, investigate and suggest fixes
+## 手順
+
+1. `cargo test --all` で全テスト実行
+2. 成功 → テスト数と結果を報告
+3. 失敗 → 失敗したテスト名、アサーション内容、該当コードの場所を表示
+   - 修正可能と判断できる場合は修正を提案
+
+特定のテストだけ実行したい場合は引数でフィルタ: `/test <テスト名パターン>`
+→ `cargo test --all <パターン>` で実行
