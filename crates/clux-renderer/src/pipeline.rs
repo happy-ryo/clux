@@ -96,13 +96,19 @@ impl RenderPipeline {
         })
     }
 
-    pub fn resize(&mut self, width: u32, height: u32) {
-        if width > 0 && height > 0 {
-            self.config.width = width;
-            self.config.height = height;
+    /// Resize the surface (physical pixels) and update shader uniforms (logical pixels).
+    pub fn resize(&mut self, physical_width: u32, physical_height: u32, scale_factor: f64) {
+        if physical_width > 0 && physical_height > 0 {
+            self.config.width = physical_width;
+            self.config.height = physical_height;
             self.surface.configure(&self.device, &self.config);
-            self.cell_renderer
-                .update_uniforms(&self.queue, width as f32, height as f32);
+            // Shader uniforms use logical pixels (matching instance coordinates)
+            let scale = scale_factor as f32;
+            self.cell_renderer.update_uniforms(
+                &self.queue,
+                physical_width as f32 / scale,
+                physical_height as f32 / scale,
+            );
         }
     }
 
