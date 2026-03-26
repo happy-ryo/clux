@@ -78,6 +78,12 @@ struct App {
     coord_panel: Option<CoordPanel>,
     /// Tokio runtime for the MCP server.
     tokio_rt: Arc<tokio::runtime::Runtime>,
+    /// Cached cell instances for rendering (rebuilt only when dirty).
+    cached_cells: Vec<CellInstance>,
+    /// Whether the cell cache needs rebuilding.
+    cells_dirty: bool,
+    /// Frame counter for throttling expensive operations.
+    frame_count: u64,
 }
 
 impl App {
@@ -103,6 +109,9 @@ impl App {
             mcp_state: None,
             coord_panel: None,
             tokio_rt,
+            cached_cells: Vec::new(),
+            cells_dirty: true,
+            frame_count: 0,
         }
     }
 
@@ -239,6 +248,7 @@ impl App {
     fn switch_tab(&mut self, index: usize) {
         if index < self.tabs.len() && index != self.active_tab {
             self.active_tab = index;
+            self.cells_dirty = true;
             info!(active = index, "Switched to tab");
             self.resize_all_panes();
         }
@@ -294,6 +304,7 @@ impl App {
 
     fn process_terminal_output(&mut self) {
         let mut newly_detected: Vec<PaneId> = Vec::new();
+        let mut any_output = false;
 
         for (&pane_id, pane) in &mut self.panes {
             let had_output = {
@@ -313,6 +324,9 @@ impl App {
                 }
                 received
             };
+            if had_output {
+                any_output = true;
+            }
             // Reset scroll offset when new output arrives (user is at live view)
             if had_output && pane.buffer.scroll_offset > 0 {
                 pane.buffer.reset_scroll();
@@ -321,6 +335,10 @@ impl App {
             if pane.claude_detector.detected && !pane.claude_detector.config_injected {
                 newly_detected.push(pane_id);
             }
+        }
+
+        if any_output {
+            self.cells_dirty = true;
         }
 
         // Inject MCP config for newly detected Claude Code panes
@@ -365,7 +383,16 @@ impl App {
         let pane_rects = self.tabs[self.active_tab].all_pane_rects(viewport);
         let cell_w = self.cell_width * self.scale_factor as f32;
         let cell_h = self.cell_height * self.scale_factor as f32;
-        let mut instances = Vec::new();
+        // Estimate capacity: 2 instances per cell (bg + fg) for all visible cells
+        let estimated = pane_rects
+            .iter()
+            .map(|(id, _)| {
+                self.panes
+                    .get(id)
+                    .map_or(0, |p| p.buffer.cols * p.buffer.rows * 2)
+            })
+            .sum();
+        let mut instances = Vec::with_capacity(estimated);
 
         struct GlyphRequest {
             px: f32,
@@ -837,6 +864,7 @@ impl App {
                 } else {
                     pane.buffer.scroll_view_down(count);
                 }
+                self.cells_dirty = true;
             }
         }
     }
@@ -911,15 +939,26 @@ impl ApplicationHandler for App {
                 self.request_redraw();
             }
             WindowEvent::RedrawRequested => {
+                self.frame_count += 1;
                 self.process_terminal_output();
                 self.try_auto_save();
-                self.update_pane_contexts();
+
+                // Throttle expensive MCP context updates (~every 60 frames)
+                if self.frame_count.is_multiple_of(60) {
+                    self.update_pane_contexts();
+                }
 
                 if self.resize_debouncer.poll().is_some() {
                     self.resize_all_panes();
+                    self.cells_dirty = true;
                 }
 
-                let cells = self.build_cell_instances();
+                // Only rebuild cell instances when content changed
+                if self.cells_dirty {
+                    self.cached_cells = self.build_cell_instances();
+                    self.cells_dirty = false;
+                }
+
                 if let Some(ref mut renderer) = self.renderer {
                     let bg_color = &self.config.colors.background;
                     let bg = wgpu::Color {
@@ -928,7 +967,7 @@ impl ApplicationHandler for App {
                         b: f64::from(bg_color[2]),
                         a: 1.0,
                     };
-                    if let Err(e) = renderer.render_frame(bg, &cells) {
+                    if let Err(e) = renderer.render_frame(bg, &self.cached_cells) {
                         tracing::error!("Render error: {e}");
                     }
                 }
