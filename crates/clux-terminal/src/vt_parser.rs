@@ -191,7 +191,42 @@ impl Perform for VtHandler<'_> {
                 // Restore Cursor Position
                 self.buffer.restore_cursor();
             }
+            'h' | 'l' => {
+                // SM/RM - Set/Reset Mode (non-DEC private modes)
+                // Mode 4 = insert mode, others are typically ignored in modern terminals
+                for &p in &params {
+                    match (p, action) {
+                        (4, 'h') => self.buffer.insert_mode = true,
+                        (4, 'l') => self.buffer.insert_mode = false,
+                        _ => {}
+                    }
+                }
+            }
             'm' => self.handle_sgr(&params),
+            'n' | 't' => {
+                // DSR (n) / Window manipulation (t) - ignored
+            }
+            'b' => {
+                // REP - Repeat preceding graphic character
+                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                if let Some(&last_char) = self
+                    .buffer
+                    .cells
+                    .get(self.buffer.cursor.row)
+                    .and_then(|row| {
+                        if self.buffer.cursor.col > 0 {
+                            row.get(self.buffer.cursor.col - 1)
+                        } else {
+                            None
+                        }
+                    })
+                    .map(|cell| &cell.c)
+                {
+                    for _ in 0..n {
+                        self.buffer.put_char(last_char);
+                    }
+                }
+            }
             _ => {
                 debug!(action = %action, ?params, "Unhandled CSI sequence");
             }
@@ -321,8 +356,15 @@ impl VtHandler<'_> {
     fn handle_dec_private_mode(&mut self, params: &[u16], action: char) {
         for &param in params {
             match (param, action) {
+                (47 | 1047, 'h') => {
+                    // Alternate screen (without save/restore cursor)
+                    self.buffer.enter_alternate_screen();
+                }
+                (47 | 1047, 'l') => {
+                    self.buffer.exit_alternate_screen();
+                }
                 (1049, 'h') => {
-                    // Enable alternate screen buffer
+                    // Enable alternate screen buffer (with save/restore cursor)
                     self.buffer.save_cursor();
                     self.buffer.enter_alternate_screen();
                 }
@@ -331,9 +373,10 @@ impl VtHandler<'_> {
                     self.buffer.exit_alternate_screen();
                     self.buffer.restore_cursor();
                 }
-                (1 | 7 | 12 | 2004, 'h' | 'l') => {
+                (1 | 7 | 12 | 2004 | 1000 | 1002 | 1003 | 1006, 'h' | 'l') => {
                     // DECCKM (1), DECAWM (7), att610 blink (12), bracketed paste (2004)
-                    // Handled at input layer or cosmetic only
+                    // Mouse tracking: normal (1000), button (1002), any (1003), SGR (1006)
+                    // Handled at input layer or not yet implemented
                 }
                 (25, 'h') => {
                     // DECTCEM - Show cursor

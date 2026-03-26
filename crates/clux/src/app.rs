@@ -664,7 +664,7 @@ impl App {
     }
 
     /// Resolve glyph atlas lookups and append foreground instances.
-    /// Glyphs are clamped to cell boundaries to prevent overflow.
+    /// Glyphs are rendered at the cell position, fitted to the cell size.
     fn resolve_glyphs(
         renderer: &mut RenderPipeline,
         requests: &[GlyphRequest],
@@ -678,26 +678,25 @@ impl App {
                 && glyph.width > 0
                 && glyph.height > 0
             {
-                // Clamp glyph to fit within the cell boundary
-                let gx = req.px + glyph.offset_x as f32;
-                let gy = req.py + (cell_h - glyph.offset_y as f32);
-                let gw = (glyph.width as f32).min(cell_w - glyph.offset_x as f32);
+                // Render glyph at its natural size within the cell.
+                // For most characters this fits. For oversized glyphs (e.g. box-drawing),
+                // render at cell width to prevent overflow into adjacent cells.
+                let gw = (glyph.width as f32).min(cell_w);
                 let gh = glyph.height as f32;
+                let gx = req.px + (glyph.offset_x as f32).max(0.0);
+                let gy = req.py + (cell_h - glyph.offset_y as f32);
 
-                // Only render if the glyph has positive dimensions after clamping
-                if gw > 0.0 && gh > 0.0 {
-                    // Adjust UV if we clamped the width
-                    let uv_w = if gw < glyph.width as f32 {
-                        glyph.uv_w * (gw / glyph.width as f32)
-                    } else {
-                        glyph.uv_w
-                    };
+                // Adjust UV proportionally if width was clamped
+                let uv_w = if gw < glyph.width as f32 {
+                    glyph.uv_w * (gw / glyph.width as f32)
+                } else {
+                    glyph.uv_w
+                };
 
-                    instances.push(CellInstance::glyph(
-                        gx, gy, gw, gh, req.fg_r, req.fg_g, req.fg_b, glyph.u, glyph.v, uv_w,
-                        glyph.uv_h,
-                    ));
-                }
+                instances.push(CellInstance::glyph(
+                    gx, gy, gw, gh, req.fg_r, req.fg_g, req.fg_b, glyph.u, glyph.v, uv_w,
+                    glyph.uv_h,
+                ));
             }
         }
     }
