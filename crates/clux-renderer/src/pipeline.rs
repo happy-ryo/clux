@@ -5,8 +5,8 @@ use crate::atlas::GlyphAtlas;
 use crate::border::BorderRenderer;
 use crate::cell_renderer::{CellInstance, CellRenderer};
 
-/// Default font size in pixels.
-const DEFAULT_FONT_SIZE: f32 = 16.0;
+/// Font size in pixels, tuned so Consolas advance width fits `DEFAULT_CELL_WIDTH`.
+const DEFAULT_FONT_SIZE: f32 = 14.0;
 
 /// GPU rendering pipeline state.
 pub struct RenderPipeline {

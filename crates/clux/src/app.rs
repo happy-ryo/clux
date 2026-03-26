@@ -1201,13 +1201,11 @@ impl ApplicationHandler for App {
 
         self.scale_factor = window.scale_factor();
 
-        let mut renderer = pollster::block_on(RenderPipeline::new(Arc::clone(&window)))
+        let renderer = pollster::block_on(RenderPipeline::new(Arc::clone(&window)))
             .expect("Failed to initialize GPU renderer");
 
-        // Use actual font metrics for cell size so glyphs aren't squished
-        let (mw, mh) = renderer.measure_cell_size();
-        self.cell_width = mw;
-        self.cell_height = mh;
+        // Cell size stays at DEFAULT_CELL_WIDTH/HEIGHT (8x16).
+        // Font size (14pt) is tuned so Consolas glyphs fit within 8x16 cells.
 
         info!(
             scale_factor = self.scale_factor,
