@@ -351,10 +351,20 @@ fn read_loop(handle: HANDLE, tx: Sender<Vec<u8>>, shutdown: Arc<AtomicBool>) {
             Ok(()) if bytes_read > 0 => {
                 let data = buf[..bytes_read as usize].to_vec();
                 if tx.send(data).is_err() {
+                    debug!("Read loop: output channel closed");
                     break;
                 }
             }
-            _ => break,
+            Ok(()) => {
+                debug!("Read loop: zero-length read, pipe closed");
+                break;
+            }
+            Err(e) => {
+                if !shutdown.load(Ordering::Relaxed) {
+                    debug!(%e, "Read loop: ReadFile error (expected during shutdown)");
+                }
+                break;
+            }
         }
     }
     unsafe {
@@ -368,7 +378,7 @@ fn write_loop(handle: HANDLE, rx: Receiver<Vec<u8>>, shutdown: Arc<AtomicBool>) 
             break;
         }
         let mut written: u32 = 0;
-        let _ = unsafe {
+        let result = unsafe {
             windows::Win32::Storage::FileSystem::WriteFile(
                 handle,
                 Some(&data),
@@ -376,6 +386,12 @@ fn write_loop(handle: HANDLE, rx: Receiver<Vec<u8>>, shutdown: Arc<AtomicBool>) 
                 None,
             )
         };
+        if let Err(e) = result {
+            if !shutdown.load(Ordering::Relaxed) {
+                warn!(%e, "Write loop: WriteFile error");
+            }
+            break;
+        }
     }
     unsafe {
         let _ = CloseHandle(handle);

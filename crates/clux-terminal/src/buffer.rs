@@ -834,4 +834,103 @@ mod tests {
         buf.set_title("My Terminal".to_string());
         assert_eq!(buf.title, "My Terminal");
     }
+
+    // --- Edge case tests ---
+
+    #[test]
+    fn unicode_cjk_characters() {
+        let mut buf = TerminalBuffer::new(20, 5);
+        buf.set_cursor_pos(0, 0);
+        // CJK characters (each typically 2 cells wide, but we store per-cell)
+        for c in "日本語テスト".chars() {
+            buf.put_char(c);
+        }
+        assert_eq!(buf.cells[0][0].c, '日');
+        assert_eq!(buf.cells[0][1].c, '本');
+        assert_eq!(buf.cells[0][5].c, 'ト');
+    }
+
+    #[test]
+    fn emoji_in_buffer() {
+        let mut buf = TerminalBuffer::new(20, 5);
+        buf.set_cursor_pos(0, 0);
+        buf.put_char('🚀');
+        buf.put_char('✨');
+        buf.put_char('🎉');
+        assert_eq!(buf.cells[0][0].c, '🚀');
+        assert_eq!(buf.cells[0][1].c, '✨');
+        assert_eq!(buf.cells[0][2].c, '🎉');
+    }
+
+    #[test]
+    fn rapid_resize_does_not_panic() {
+        let mut buf = TerminalBuffer::new(80, 24);
+        buf.set_cursor_pos(10, 40);
+        buf.put_char('X');
+
+        // Rapid resize sequence
+        for size in [(10, 5), (200, 50), (1, 1), (80, 24), (3, 3)] {
+            buf.resize(size.0, size.1);
+            // Cursor should be clamped
+            assert!(buf.cursor.col < buf.cols);
+            assert!(buf.cursor.row < buf.rows);
+        }
+    }
+
+    #[test]
+    fn resize_to_minimum() {
+        let mut buf = TerminalBuffer::new(80, 24);
+        buf.set_cursor_pos(12, 60);
+        buf.put_char('Z');
+        buf.resize(1, 1);
+        assert_eq!(buf.cols, 1);
+        assert_eq!(buf.rows, 1);
+        assert_eq!(buf.cursor.col, 0);
+        assert_eq!(buf.cursor.row, 0);
+    }
+
+    #[test]
+    fn high_speed_output_fills_scrollback() {
+        let mut buf = TerminalBuffer::new(10, 3);
+        buf.scrollback_max = 100;
+
+        // Simulate rapid output: 500 lines
+        for i in 0..500u32 {
+            buf.set_cursor_pos(buf.rows - 1, 0);
+            let c = char::from(b'A' + (i % 26) as u8);
+            buf.put_char(c);
+            buf.newline();
+        }
+
+        // Scrollback should be capped at max
+        assert!(buf.scrollback.len() <= buf.scrollback_max);
+        assert!(!buf.scrollback.is_empty());
+    }
+
+    #[test]
+    fn put_char_wraps_at_end_of_line() {
+        let mut buf = TerminalBuffer::new(5, 3);
+        buf.set_cursor_pos(0, 0);
+        for c in "ABCDE".chars() {
+            buf.put_char(c);
+        }
+        // After 5 chars in 5-col buffer, cursor should wrap to next line
+        assert_eq!(buf.cursor.row, 1);
+        assert_eq!(buf.cursor.col, 0);
+        assert_eq!(buf.cells[0][4].c, 'E');
+    }
+
+    #[test]
+    fn scroll_view_beyond_scrollback() {
+        let mut buf = TerminalBuffer::new(10, 3);
+        buf.scrollback_max = 10;
+        // Add a few lines to scrollback
+        for _ in 0..5 {
+            buf.set_cursor_pos(2, 0);
+            buf.newline();
+        }
+        // Try to scroll way past available scrollback
+        buf.scroll_view_up(1000);
+        assert!(buf.scroll_offset <= buf.scrollback.len());
+    }
 }

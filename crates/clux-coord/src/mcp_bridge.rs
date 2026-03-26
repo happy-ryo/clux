@@ -51,6 +51,7 @@ async fn handle_mcp_request(
     axum::extract::State(state): axum::extract::State<Arc<McpState>>,
     Json(req): Json<JsonRpcRequest>,
 ) -> Json<JsonRpcResponse> {
+    tracing::debug!(method = %req.method, "MCP request received");
     let response = match req.method.as_str() {
         "initialize" => handle_initialize(&req),
         "tools/list" => handle_tools_list(&req),
