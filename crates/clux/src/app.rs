@@ -1,13 +1,17 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
 use tracing::info;
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
+use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::keyboard::ModifiersState;
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
+use clux_layout::pane::{PaneId, Rect};
+use clux_layout::tab::Tab;
+use clux_layout::tree::Direction;
 use clux_renderer::pipeline::RenderPipeline;
 use clux_terminal::buffer::TerminalBuffer;
 use clux_terminal::conpty::ConPty;
@@ -20,20 +24,23 @@ use clux_terminal::terminal_size::{
 const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 30;
 
+struct PaneState {
+    terminal: ConPty,
+    buffer: TerminalBuffer,
+    vt_parser: vte::Parser,
+}
+
 struct App {
     window: Option<Arc<Window>>,
     renderer: Option<RenderPipeline>,
-    terminal: Option<ConPty>,
-    buffer: TerminalBuffer,
-    vt_parser: vte::Parser,
+    tab: Tab,
+    panes: HashMap<PaneId, PaneState>,
     resize_debouncer: ResizeDebouncer,
-    /// Logical cell width in pixels (before DPI scaling).
     cell_width: f32,
-    /// Logical cell height in pixels (before DPI scaling).
     cell_height: f32,
-    /// Current DPI scale factor from the OS.
     scale_factor: f64,
     modifiers: ModifiersState,
+    cursor_position: (f64, f64),
 }
 
 impl App {
@@ -41,23 +48,73 @@ impl App {
         Self {
             window: None,
             renderer: None,
-            terminal: None,
-            buffer: TerminalBuffer::new(DEFAULT_COLS as usize, DEFAULT_ROWS as usize),
-            vt_parser: vte::Parser::new(),
+            tab: Tab::new("main"),
+            panes: HashMap::new(),
             resize_debouncer: ResizeDebouncer::new(50),
             cell_width: DEFAULT_CELL_WIDTH,
             cell_height: DEFAULT_CELL_HEIGHT,
             scale_factor: 1.0,
             modifiers: ModifiersState::empty(),
+            cursor_position: (0.0, 0.0),
         }
     }
 
+    fn spawn_pane(&mut self, cols: u16, rows: u16) -> Option<PaneId> {
+        // The Tab already assigned a PaneId when it was created or split.
+        // We need to find which pane IDs exist in the tab but not in our HashMap.
+        let tab_ids = self.tab.all_pane_rects(Rect::new(0.0, 0.0, 1.0, 1.0));
+        for (pane_id, _) in &tab_ids {
+            if !self.panes.contains_key(pane_id) {
+                match ConPty::spawn(cols, rows, "pwsh.exe") {
+                    Ok(terminal) => {
+                        info!(pane_id, "Spawned ConPTY for pane");
+                        self.panes.insert(
+                            *pane_id,
+                            PaneState {
+                                terminal,
+                                buffer: TerminalBuffer::new(cols as usize, rows as usize),
+                                vt_parser: vte::Parser::new(),
+                            },
+                        );
+                        return Some(*pane_id);
+                    }
+                    Err(e) => {
+                        tracing::error!(pane_id, "Failed to spawn terminal: {e}");
+                        return None;
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn close_active_pane(&mut self) {
+        if self.tab.pane_count() <= 1 {
+            info!("Cannot close the last pane");
+            return;
+        }
+        let pane_id = self.tab.active_pane;
+        if self.tab.close_pane(pane_id) {
+            // Removing from HashMap drops ConPty, which cleans up the process
+            self.panes.remove(&pane_id);
+            info!(pane_id, "Pane closed");
+        }
+    }
+
+    fn split_active(&mut self, direction: Direction) {
+        let new_id = self.tab.split_active(direction, 0.5);
+        info!(new_pane_id = new_id, ?direction, "Split active pane");
+        self.spawn_pane(DEFAULT_COLS, DEFAULT_ROWS);
+        // Resize all panes to their new rects
+        self.resize_all_panes();
+    }
+
     fn process_terminal_output(&mut self) {
-        if let Some(ref terminal) = self.terminal {
-            while let Some(data) = terminal.try_read() {
+        for pane in self.panes.values_mut() {
+            while let Some(data) = pane.terminal.try_read() {
                 clux_terminal::vt_parser::process_bytes(
-                    &mut self.vt_parser,
-                    &mut self.buffer,
+                    &mut pane.vt_parser,
+                    &mut pane.buffer,
                     &data,
                 );
             }
@@ -70,17 +127,70 @@ impl App {
         }
     }
 
-    /// Recalculate terminal dimensions from physical pixel size and schedule
-    /// a debounced resize for `ConPTY` and the terminal buffer.
-    fn schedule_terminal_resize(&mut self, physical_width: u32, physical_height: u32) {
-        let (cols, rows) = pixel_size_to_terminal_size(
-            physical_width,
-            physical_height,
-            self.cell_width,
-            self.cell_height,
-            self.scale_factor,
-        );
-        self.resize_debouncer.request(cols, rows);
+    fn viewport(&self) -> Rect {
+        if let Some(ref window) = self.window {
+            let size = window.inner_size();
+            Rect::new(0.0, 0.0, size.width as f32, size.height as f32)
+        } else {
+            Rect::new(0.0, 0.0, 800.0, 600.0)
+        }
+    }
+
+    fn resize_all_panes(&mut self) {
+        let viewport = self.viewport();
+        for (pane_id, rect) in self.tab.all_pane_rects(viewport) {
+            if let Some(pane) = self.panes.get_mut(&pane_id) {
+                let (cols, rows) = pixel_size_to_terminal_size(
+                    rect.width as u32,
+                    rect.height as u32,
+                    self.cell_width,
+                    self.cell_height,
+                    self.scale_factor,
+                );
+                let _ = pane.terminal.resize(cols, rows);
+                pane.buffer.resize(cols as usize, rows as usize);
+            }
+        }
+    }
+
+    /// Check if a key event is a pane management shortcut (Ctrl+Shift+...).
+    /// Returns true if the event was handled.
+    fn handle_pane_shortcut(&mut self, event: &winit::event::KeyEvent) -> bool {
+        if event.state != ElementState::Pressed {
+            return false;
+        }
+        let ctrl_shift = self
+            .modifiers
+            .contains(ModifiersState::CONTROL | ModifiersState::SHIFT);
+        if !ctrl_shift {
+            return false;
+        }
+
+        match &event.logical_key {
+            Key::Character(c) if c.as_str() == "V" || c.as_str() == "v" => {
+                self.split_active(Direction::Vertical);
+                true
+            }
+            Key::Character(c) if c.as_str() == "H" || c.as_str() == "h" => {
+                self.split_active(Direction::Horizontal);
+                true
+            }
+            Key::Character(c) if c.as_str() == "W" || c.as_str() == "w" => {
+                self.close_active_pane();
+                true
+            }
+            Key::Named(NamedKey::ArrowRight) => {
+                self.tab.cycle_focus(true);
+                info!(active = self.tab.active_pane, "Focus cycled forward");
+                true
+            }
+            Key::Named(NamedKey::ArrowLeft) => {
+                self.tab.cycle_focus(false);
+                info!(active = self.tab.active_pane, "Focus cycled backward");
+                true
+            }
+            _ => false,
+        }
     }
 }
 
@@ -97,10 +207,8 @@ impl ApplicationHandler for App {
                 .expect("Failed to create window"),
         );
 
-        // Capture the initial DPI scale factor from the window
         self.scale_factor = window.scale_factor();
 
-        // Initialize renderer
         let renderer = pollster::block_on(RenderPipeline::new(Arc::clone(&window)))
             .expect("Failed to initialize GPU renderer");
 
@@ -109,19 +217,11 @@ impl ApplicationHandler for App {
             "Window and GPU renderer initialized"
         );
 
-        // Spawn terminal
-        match ConPty::spawn(DEFAULT_COLS, DEFAULT_ROWS, "pwsh.exe") {
-            Ok(pty) => {
-                info!("ConPTY terminal spawned");
-                self.terminal = Some(pty);
-            }
-            Err(e) => {
-                tracing::error!("Failed to spawn terminal: {}", e);
-            }
-        }
-
         self.renderer = Some(renderer);
         self.window = Some(window);
+
+        // Spawn the initial pane (Tab::new already created pane_id 0)
+        self.spawn_pane(DEFAULT_COLS, DEFAULT_ROWS);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -134,7 +234,7 @@ impl ApplicationHandler for App {
                 if let Some(ref mut renderer) = self.renderer {
                     renderer.resize(physical_size.width, physical_size.height);
                 }
-                self.schedule_terminal_resize(physical_size.width, physical_size.height);
+                self.resize_all_panes();
                 self.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
@@ -146,28 +246,21 @@ impl ApplicationHandler for App {
                     "DPI scale factor changed"
                 );
 
-                // Recalculate terminal size with the new scale factor using
-                // the current physical window size.
                 if let Some(ref window) = self.window {
                     let size = window.inner_size();
                     if let Some(ref mut renderer) = self.renderer {
                         renderer.resize(size.width, size.height);
                     }
-                    self.schedule_terminal_resize(size.width, size.height);
                 }
-
-                // TODO: rebuild glyph atlas at new DPI for sharper rendering
+                self.resize_all_panes();
                 self.request_redraw();
             }
             WindowEvent::RedrawRequested => {
                 self.process_terminal_output();
 
-                // Check for pending resize
-                if let Some((cols, rows)) = self.resize_debouncer.poll() {
-                    if let Some(ref terminal) = self.terminal {
-                        let _ = terminal.resize(cols, rows);
-                    }
-                    self.buffer.resize(cols as usize, rows as usize);
+                // Apply any pending debounced resize
+                if self.resize_debouncer.poll().is_some() {
+                    self.resize_all_panes();
                 }
 
                 if let Some(ref mut renderer) = self.renderer {
@@ -177,28 +270,48 @@ impl ApplicationHandler for App {
                         b: 0.180,
                         a: 1.0,
                     };
-                    // TODO: build CellInstance list from terminal buffer
+                    // TODO: build CellInstance list from all pane buffers
                     if let Err(e) = renderer.render_frame(bg, &[]) {
-                        tracing::error!("Render error: {}", e);
+                        tracing::error!("Render error: {e}");
                     }
                 }
 
-                // Request continuous redraws for terminal output
                 self.request_redraw();
             }
             WindowEvent::ModifiersChanged(new_modifiers) => {
                 self.modifiers = new_modifiers.state();
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor_position = (position.x, position.y);
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
+                let viewport = self.viewport();
+                let (x, y) = self.cursor_position;
+                if self.tab.focus_at(x as f32, y as f32, viewport) {
+                    info!(
+                        active = self.tab.active_pane,
+                        "Focus changed via mouse click"
+                    );
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.state == winit::event::ElementState::Pressed
-                    && let Some(ref terminal) = self.terminal
+                // Check pane shortcuts first
+                if self.handle_pane_shortcut(&event) {
+                    return;
+                }
+
+                // Forward to active pane's terminal
+                if event.state == ElementState::Pressed
+                    && let Some(pane) = self.panes.get(&self.tab.active_pane)
                 {
-                    // Try special-key / modifier mapping first
                     if let Some(bytes) = key_event_to_bytes(&event, self.modifiers) {
-                        terminal.write(&bytes);
+                        pane.terminal.write(&bytes);
                     } else if let Some(ref text) = event.text {
-                        // Fall back to plain text input
-                        terminal.write(text.as_bytes());
+                        pane.terminal.write(text.as_bytes());
                     }
                 }
             }
