@@ -9,7 +9,7 @@ pub struct Tab {
 }
 
 impl Tab {
-    /// Create a new tab with a single pane.
+    /// Create a new tab with a single pane (pane ID starts at 0).
     #[must_use]
     pub fn new(name: impl Into<String>) -> Self {
         Self {
@@ -20,8 +20,20 @@ impl Tab {
         }
     }
 
+    /// Create a new tab with a specific initial pane ID.
+    /// Used when pane IDs are managed globally across tabs.
+    #[must_use]
+    pub fn with_pane_id(name: impl Into<String>, pane_id: PaneId) -> Self {
+        Self {
+            name: name.into(),
+            root: LayoutNode::Leaf { pane_id },
+            active_pane: pane_id,
+            next_pane_id: pane_id + 1,
+        }
+    }
+
     /// Split the active pane in the given direction. Returns the new pane ID.
-    /// The new pane becomes active.
+    /// The new pane becomes active. Uses internal ID counter.
     pub fn split_active(&mut self, direction: Direction, ratio: f32) -> PaneId {
         let new_id = self.next_pane_id;
         self.next_pane_id += 1;
@@ -29,6 +41,14 @@ impl Tab {
             .split_pane(self.active_pane, new_id, direction, ratio);
         self.active_pane = new_id;
         new_id
+    }
+
+    /// Split the active pane using an externally provided pane ID.
+    /// Used when pane IDs are managed globally across tabs.
+    pub fn split_active_with_id(&mut self, direction: Direction, ratio: f32, new_pane_id: PaneId) {
+        self.root
+            .split_pane(self.active_pane, new_pane_id, direction, ratio);
+        self.active_pane = new_pane_id;
     }
 
     /// Close a pane. If the closed pane was active, switch to the first
