@@ -11,6 +11,9 @@ use clux_renderer::pipeline::RenderPipeline;
 use clux_terminal::buffer::TerminalBuffer;
 use clux_terminal::conpty::ConPty;
 use clux_terminal::resize::ResizeDebouncer;
+use clux_terminal::terminal_size::{
+    DEFAULT_CELL_HEIGHT, DEFAULT_CELL_WIDTH, pixel_size_to_terminal_size,
+};
 
 const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 30;
@@ -22,6 +25,12 @@ struct App {
     buffer: TerminalBuffer,
     vt_parser: vte::Parser,
     resize_debouncer: ResizeDebouncer,
+    /// Logical cell width in pixels (before DPI scaling).
+    cell_width: f32,
+    /// Logical cell height in pixels (before DPI scaling).
+    cell_height: f32,
+    /// Current DPI scale factor from the OS.
+    scale_factor: f64,
 }
 
 impl App {
@@ -33,6 +42,9 @@ impl App {
             buffer: TerminalBuffer::new(DEFAULT_COLS as usize, DEFAULT_ROWS as usize),
             vt_parser: vte::Parser::new(),
             resize_debouncer: ResizeDebouncer::new(50),
+            cell_width: DEFAULT_CELL_WIDTH,
+            cell_height: DEFAULT_CELL_HEIGHT,
+            scale_factor: 1.0,
         }
     }
 
@@ -53,6 +65,19 @@ impl App {
             window.request_redraw();
         }
     }
+
+    /// Recalculate terminal dimensions from physical pixel size and schedule
+    /// a debounced resize for `ConPTY` and the terminal buffer.
+    fn schedule_terminal_resize(&mut self, physical_width: u32, physical_height: u32) {
+        let (cols, rows) = pixel_size_to_terminal_size(
+            physical_width,
+            physical_height,
+            self.cell_width,
+            self.cell_height,
+            self.scale_factor,
+        );
+        self.resize_debouncer.request(cols, rows);
+    }
 }
 
 impl ApplicationHandler for App {
@@ -68,11 +93,17 @@ impl ApplicationHandler for App {
                 .expect("Failed to create window"),
         );
 
+        // Capture the initial DPI scale factor from the window
+        self.scale_factor = window.scale_factor();
+
         // Initialize renderer
         let renderer = pollster::block_on(RenderPipeline::new(Arc::clone(&window)))
             .expect("Failed to initialize GPU renderer");
 
-        info!("Window and GPU renderer initialized");
+        info!(
+            scale_factor = self.scale_factor,
+            "Window and GPU renderer initialized"
+        );
 
         // Spawn terminal
         match ConPty::spawn(DEFAULT_COLS, DEFAULT_ROWS, "pwsh.exe") {
@@ -99,7 +130,29 @@ impl ApplicationHandler for App {
                 if let Some(ref mut renderer) = self.renderer {
                     renderer.resize(physical_size.width, physical_size.height);
                 }
-                // TODO: calculate terminal cols/rows from pixel size
+                self.schedule_terminal_resize(physical_size.width, physical_size.height);
+                self.request_redraw();
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                let old_factor = self.scale_factor;
+                self.scale_factor = scale_factor;
+                info!(
+                    old_factor,
+                    new_factor = scale_factor,
+                    "DPI scale factor changed"
+                );
+
+                // Recalculate terminal size with the new scale factor using
+                // the current physical window size.
+                if let Some(ref window) = self.window {
+                    let size = window.inner_size();
+                    if let Some(ref mut renderer) = self.renderer {
+                        renderer.resize(size.width, size.height);
+                    }
+                    self.schedule_terminal_resize(size.width, size.height);
+                }
+
+                // TODO: rebuild glyph atlas at new DPI for sharper rendering
                 self.request_redraw();
             }
             WindowEvent::RedrawRequested => {
