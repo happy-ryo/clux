@@ -28,6 +28,8 @@ use clux_terminal::terminal_size::{
     DEFAULT_CELL_HEIGHT, DEFAULT_CELL_WIDTH, pixel_size_to_terminal_size,
 };
 
+use clux_renderer::box_drawing;
+
 use crate::config::Config;
 use crate::selection::{CellCoord, Selection, extract_text, pixel_to_cell};
 
@@ -74,6 +76,8 @@ struct App {
     auto_saver: AutoSaver,
     cell_width: f32,
     cell_height: f32,
+    /// Distance from top of cell to the font baseline (in logical pixels).
+    ascent: f32,
     scale_factor: f64,
     modifiers: ModifiersState,
     cursor_position: (f64, f64),
@@ -116,6 +120,7 @@ impl App {
             auto_saver: AutoSaver::default_debounce(),
             cell_width: DEFAULT_CELL_WIDTH,
             cell_height: DEFAULT_CELL_HEIGHT,
+            ascent: DEFAULT_CELL_HEIGHT * 0.8,
             scale_factor: 1.0,
             modifiers: ModifiersState::empty(),
             cursor_position: (0.0, 0.0),
@@ -545,13 +550,14 @@ impl App {
             self.renderer.as_mut().expect("checked above"),
             &glyph_requests,
             cell_w,
-            cell_h,
+            self.ascent,
             &mut instances,
         );
 
         instances
     }
 
+    #[allow(clippy::too_many_lines)]
     fn build_cell_instances(&mut self) -> Vec<CellInstance> {
         if self.renderer.is_none() {
             return Vec::new();
@@ -639,14 +645,23 @@ impl App {
                     ));
 
                     if cell.c != ' ' {
-                        glyph_requests.push(GlyphRequest {
-                            px,
-                            py,
-                            c: cell.c,
-                            fg_r,
-                            fg_g,
-                            fg_b,
-                        });
+                        let box_quads = if box_drawing::is_box_drawing(cell.c) {
+                            box_drawing::render(cell.c, px, py, cell_w, cell_h, fg_r, fg_g, fg_b)
+                        } else {
+                            vec![]
+                        };
+                        if box_quads.is_empty() {
+                            glyph_requests.push(GlyphRequest {
+                                px,
+                                py,
+                                c: cell.c,
+                                fg_r,
+                                fg_g,
+                                fg_b,
+                            });
+                        } else {
+                            instances.extend(box_quads);
+                        }
                     }
                 }
             }
@@ -664,12 +679,12 @@ impl App {
     }
 
     /// Resolve glyph atlas lookups and append foreground instances.
-    /// Glyphs are rendered at the cell position, fitted to the cell size.
+    /// Glyph Y position is computed from the baseline (`cell_y` + ascent).
     fn resolve_glyphs(
         renderer: &mut RenderPipeline,
         requests: &[GlyphRequest],
         cell_w: f32,
-        cell_h: f32,
+        ascent: f32,
         instances: &mut Vec<CellInstance>,
     ) {
         let font_size = renderer.font_size();
@@ -678,13 +693,13 @@ impl App {
                 && glyph.width > 0
                 && glyph.height > 0
             {
-                // Render glyph at its natural size within the cell.
-                // For most characters this fits. For oversized glyphs (e.g. box-drawing),
-                // render at cell width to prevent overflow into adjacent cells.
                 let gw = (glyph.width as f32).min(cell_w);
                 let gh = glyph.height as f32;
-                let gx = req.px + (glyph.offset_x as f32).max(0.0);
-                let gy = req.py + (cell_h - glyph.offset_y as f32);
+                // X: cell origin + left bearing
+                let gx = req.px + glyph.offset_x as f32;
+                // Y: baseline is at cell_y + ascent.
+                // placement.top is the distance from origin to top of glyph (positive = above baseline)
+                let gy = req.py + ascent - glyph.offset_y as f32;
 
                 // Adjust UV proportionally if width was clamped
                 let uv_w = if gw < glyph.width as f32 {
@@ -1201,11 +1216,14 @@ impl ApplicationHandler for App {
 
         self.scale_factor = window.scale_factor();
 
-        let renderer = pollster::block_on(RenderPipeline::new(Arc::clone(&window)))
+        let mut renderer = pollster::block_on(RenderPipeline::new(Arc::clone(&window)))
             .expect("Failed to initialize GPU renderer");
 
-        // Cell size stays at DEFAULT_CELL_WIDTH/HEIGHT (8x16).
-        // Font size (14pt) is tuned so Consolas glyphs fit within 8x16 cells.
+        // Use measured font metrics for cell size and baseline
+        let (mw, mh, ma) = renderer.measure_cell_size();
+        self.cell_width = mw;
+        self.cell_height = mh;
+        self.ascent = ma;
 
         info!(
             scale_factor = self.scale_factor,
