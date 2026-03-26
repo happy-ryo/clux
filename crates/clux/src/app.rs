@@ -380,26 +380,21 @@ impl App {
         }
     }
 
-    /// Viewport for pane content (below the tab bar).
+    /// Viewport for pane content (below the tab bar), in logical pixels.
     /// Width and height are clamped to at least 1.0 to prevent negative dimensions.
     fn viewport(&self) -> Rect {
-        if let Some(ref window) = self.window {
-            let size = window.inner_size();
-            let bar_h = TAB_BAR_HEIGHT * self.scale_factor as f32;
-            let w = (size.width as f32).max(1.0);
-            let h = (size.height as f32 - bar_h).max(1.0);
-            Rect::new(0.0, bar_h, w, h)
-        } else {
-            let bar_h = TAB_BAR_HEIGHT;
-            Rect::new(0.0, bar_h, 800.0, 600.0 - bar_h)
-        }
+        let (win_w, win_h) = self.logical_size();
+        let w = win_w.max(1.0);
+        let h = (win_h - TAB_BAR_HEIGHT).max(1.0);
+        Rect::new(0.0, TAB_BAR_HEIGHT, w, h)
     }
 
-    /// Full window size including the tab bar area.
-    fn window_size(&self) -> (f32, f32) {
+    /// Full window size in logical pixels.
+    fn logical_size(&self) -> (f32, f32) {
         if let Some(ref window) = self.window {
             let size = window.inner_size();
-            (size.width as f32, size.height as f32)
+            let scale = self.scale_factor as f32;
+            (size.width as f32 / scale, size.height as f32 / scale)
         } else {
             (800.0, 600.0)
         }
@@ -407,10 +402,10 @@ impl App {
 
     /// Build cell instances for the tab bar.
     fn build_tab_bar_instances(&mut self) -> Vec<CellInstance> {
-        let (win_w, _) = self.window_size();
-        let bar_h = TAB_BAR_HEIGHT * self.scale_factor as f32;
-        let cell_w = self.cell_width * self.scale_factor as f32;
-        let cell_h = self.cell_height * self.scale_factor as f32;
+        let (win_w, _) = self.logical_size();
+        let bar_h = TAB_BAR_HEIGHT;
+        let cell_w = self.cell_width;
+        let cell_h = self.cell_height;
         let mut instances = Vec::new();
 
         // Tab bar background
@@ -482,8 +477,8 @@ impl App {
 
         let viewport = self.viewport();
         let pane_rects = self.tabs[self.active_tab].all_pane_rects(viewport);
-        let cell_w = self.cell_width * self.scale_factor as f32;
-        let cell_h = self.cell_height * self.scale_factor as f32;
+        let cell_w = self.cell_width;
+        let cell_h = self.cell_height;
         // Estimate capacity: 2 instances per cell (bg + fg) for all visible cells
         let estimated = pane_rects
             .iter()
@@ -619,7 +614,7 @@ impl App {
                         rect.height.max(0.0) as u32,
                         self.cell_width,
                         self.cell_height,
-                        self.scale_factor,
+                        1.0,
                     );
                     PaneSnapshot {
                         pane_id,
@@ -655,12 +650,14 @@ impl App {
         // Only resize panes in the active tab
         for (pane_id, rect) in self.tab().all_pane_rects(viewport) {
             if let Some(pane) = self.panes.get_mut(&pane_id) {
+                // Viewport and cell dimensions are both in logical pixels,
+                // so no scale_factor needed here.
                 let (cols, rows) = pixel_size_to_terminal_size(
                     rect.width.max(0.0) as u32,
                     rect.height.max(0.0) as u32,
                     self.cell_width,
                     self.cell_height,
-                    self.scale_factor,
+                    1.0,
                 );
                 let _ = pane.terminal.resize(cols, rows);
                 pane.buffer.resize(cols as usize, rows as usize);
@@ -682,14 +679,16 @@ impl App {
     /// Convert cursor pixel position to cell coordinate relative to active pane.
     fn cursor_to_cell(&self) -> Option<CellCoord> {
         let rect = self.active_pane_rect()?;
+        // cursor_position is in physical pixels; convert to logical for cell lookup
+        let scale = self.scale_factor;
         Some(pixel_to_cell(
-            self.cursor_position.0,
-            self.cursor_position.1,
+            self.cursor_position.0 / scale,
+            self.cursor_position.1 / scale,
             rect.x,
             rect.y,
             self.cell_width,
             self.cell_height,
-            self.scale_factor,
+            1.0, // already in logical pixels
         ))
     }
 
@@ -903,17 +902,20 @@ impl App {
     /// Check if a click is in the tab bar and switch tabs accordingly.
     /// Returns true if the click was handled by the tab bar.
     fn handle_tab_bar_click(&mut self, x: f32, y: f32) -> bool {
-        let bar_h = TAB_BAR_HEIGHT * self.scale_factor as f32;
-        if y >= bar_h {
+        // Convert physical pixel coords to logical
+        let scale = self.scale_factor as f32;
+        let lx = x / scale;
+        let ly = y / scale;
+        if ly >= TAB_BAR_HEIGHT {
             return false;
         }
 
-        let cell_w = self.cell_width * self.scale_factor as f32;
+        let cell_w = self.cell_width;
         let mut x_offset: f32 = 4.0;
 
         for (idx, tab) in self.tabs.iter().enumerate() {
             let tab_width = (tab.name().len() as f32 + 2.0) * cell_w;
-            if x >= x_offset && x < x_offset + tab_width {
+            if lx >= x_offset && lx < x_offset + tab_width {
                 if idx != self.active_tab {
                     self.active_tab = idx;
                     self.cells_dirty = true;
@@ -934,14 +936,18 @@ impl App {
         }
         if state == ElementState::Pressed {
             let (x, y) = self.cursor_position;
+            // Convert physical mouse coords to logical
+            let scale = self.scale_factor as f32;
+            let lx = x as f32 / scale;
+            let ly = y as f32 / scale;
 
             // Check tab bar first
-            if self.handle_tab_bar_click(x as f32, y as f32) {
+            if self.handle_tab_bar_click(lx, ly) {
                 return;
             }
 
             let viewport = self.viewport();
-            if self.tab_mut().focus_at(x as f32, y as f32, viewport) {
+            if self.tab_mut().focus_at(lx, ly, viewport) {
                 info!(
                     active = self.tab().active_pane,
                     "Focus changed via mouse click"
@@ -1093,7 +1099,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Resized(physical_size) => {
                 if let Some(ref mut renderer) = self.renderer {
-                    renderer.resize(physical_size.width, physical_size.height);
+                    renderer.resize(physical_size.width, physical_size.height, self.scale_factor);
                 }
                 self.resize_all_panes();
                 self.request_redraw();
@@ -1110,7 +1116,7 @@ impl ApplicationHandler for App {
                 if let Some(ref window) = self.window {
                     let size = window.inner_size();
                     if let Some(ref mut renderer) = self.renderer {
-                        renderer.resize(size.width, size.height);
+                        renderer.resize(size.width, size.height, self.scale_factor);
                     }
                 }
                 self.resize_all_panes();
