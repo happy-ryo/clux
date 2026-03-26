@@ -1219,11 +1219,15 @@ impl ApplicationHandler for App {
         let mut renderer = pollster::block_on(RenderPipeline::new(Arc::clone(&window)))
             .expect("Failed to initialize GPU renderer");
 
-        // Measure font baseline for correct glyph Y positioning.
-        // Cell size stays at DEFAULT 8x16 for maximum cols/rows.
-        // Box-drawing is rendered programmatically so font overflow is fine.
-        let (_mw, _mh, ma) = renderer.measure_cell_size();
-        self.ascent = ma;
+        // Measure font metrics for baseline positioning.
+        // Cell size stays at 8x16 for max cols/rows; box-drawing is programmatic.
+        // Scale ascent proportionally: font ascent is for line_height, we need it for cell_height.
+        let (_mw, mh, ma) = renderer.measure_cell_size();
+        self.ascent = if mh > 0.0 {
+            self.cell_height * (ma / mh)
+        } else {
+            self.cell_height * 0.8
+        };
 
         info!(
             scale_factor = self.scale_factor,
