@@ -973,20 +973,54 @@ impl App {
     /// Handle IME composition events.
     fn handle_ime(&mut self, ime: winit::event::Ime) {
         match ime {
+            winit::event::Ime::Enabled => {
+                // Update IME cursor area to current cursor position
+                self.update_ime_cursor_area();
+            }
             winit::event::Ime::Commit(text) => {
                 let active_id = self.tab().active_pane;
                 if let Some(pane) = self.panes.get(&active_id) {
                     pane.terminal.write(text.as_bytes());
                     info!(len = text.len(), "IME commit forwarded to pane");
                 }
+                self.cells_dirty = true;
             }
             winit::event::Ime::Preedit(text, _cursor) => {
                 if !text.is_empty() {
                     tracing::debug!(text, "IME preedit");
                 }
+                self.update_ime_cursor_area();
             }
-            _ => {}
+            winit::event::Ime::Disabled => {}
         }
+    }
+
+    /// Update the IME candidate window position to the current cursor location.
+    fn update_ime_cursor_area(&self) {
+        let Some(ref window) = self.window else {
+            return;
+        };
+        let Some(rect) = self.active_pane_rect() else {
+            return;
+        };
+        let active_id = self.tab().active_pane;
+        let Some(pane) = self.panes.get(&active_id) else {
+            return;
+        };
+
+        let scale = self.scale_factor as f32;
+        // Cursor position in logical pixels
+        let cursor_x = rect.x + pane.buffer.cursor.col as f32 * self.cell_width;
+        let cursor_y = rect.y + pane.buffer.cursor.row as f32 * self.cell_height;
+
+        // Convert to physical pixels for winit
+        let position =
+            winit::dpi::PhysicalPosition::new((cursor_x * scale) as i32, (cursor_y * scale) as i32);
+        let size = winit::dpi::PhysicalSize::new(
+            (self.cell_width * scale) as u32,
+            (self.cell_height * scale) as u32,
+        );
+        window.set_ime_cursor_area(position, size);
     }
 
     /// Handle keyboard input events.
@@ -1062,6 +1096,9 @@ impl ApplicationHandler for App {
                 .create_window(attrs)
                 .expect("Failed to create window"),
         );
+
+        // Enable IME input (required for Japanese input methods like ATOK, MS-IME)
+        window.set_ime_allowed(true);
 
         self.scale_factor = window.scale_factor();
 
