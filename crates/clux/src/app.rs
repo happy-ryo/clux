@@ -10,7 +10,9 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 use clux_coord::broker::Broker;
+use clux_coord::detect::ClaudeDetector;
 use clux_coord::mcp_bridge::McpState;
+use clux_coord::panel::CoordPanel;
 use clux_layout::pane::{PaneId, Rect};
 use clux_layout::tab::Tab;
 use clux_layout::tree::Direction;
@@ -41,6 +43,8 @@ struct PaneState {
     terminal: ConPty,
     buffer: TerminalBuffer,
     vt_parser: vte::Parser,
+    /// Detects Claude Code launch in this pane's output.
+    claude_detector: ClaudeDetector,
 }
 
 const SESSION_NAME: &str = "default";
@@ -69,6 +73,8 @@ struct App {
     clipboard: Option<arboard::Clipboard>,
     /// Shared MCP coordination state.
     mcp_state: Option<Arc<McpState>>,
+    /// Coordination panel overlay.
+    coord_panel: Option<CoordPanel>,
     /// Tokio runtime for the MCP server.
     tokio_rt: Arc<tokio::runtime::Runtime>,
 }
@@ -94,6 +100,7 @@ impl App {
             mouse_dragging: false,
             clipboard: None,
             mcp_state: None,
+            coord_panel: None,
             tokio_rt,
         }
     }
@@ -119,6 +126,7 @@ impl App {
                         Err(e) => tracing::error!("Failed to start MCP server: {e}"),
                     }
                 });
+                self.coord_panel = Some(CoordPanel::new(Arc::clone(&state.broker)));
                 self.mcp_state = Some(state);
             }
             Err(e) => {
@@ -248,6 +256,7 @@ impl App {
                         terminal,
                         buffer,
                         vt_parser: vte::Parser::new(),
+                        claude_detector: ClaudeDetector::new(),
                     },
                 );
             }
@@ -283,7 +292,9 @@ impl App {
     }
 
     fn process_terminal_output(&mut self) {
-        for pane in self.panes.values_mut() {
+        let mut newly_detected: Vec<PaneId> = Vec::new();
+
+        for (&pane_id, pane) in &mut self.panes {
             let had_output = {
                 let mut received = false;
                 while let Some(data) = pane.terminal.try_read() {
@@ -292,6 +303,11 @@ impl App {
                         &mut pane.buffer,
                         &data,
                     );
+                    // Feed raw output to Claude Code detector
+                    if !pane.claude_detector.detected {
+                        let text = String::from_utf8_lossy(&data);
+                        pane.claude_detector.feed(&text);
+                    }
                     received = true;
                 }
                 received
@@ -299,6 +315,26 @@ impl App {
             // Reset scroll offset when new output arrives (user is at live view)
             if had_output && pane.buffer.scroll_offset > 0 {
                 pane.buffer.reset_scroll();
+            }
+            // Check if Claude Code was newly detected
+            if pane.claude_detector.detected && !pane.claude_detector.config_injected {
+                newly_detected.push(pane_id);
+            }
+        }
+
+        // Inject MCP config for newly detected Claude Code panes
+        for pane_id in newly_detected {
+            if let Some(pane) = self.panes.get_mut(&pane_id) {
+                // Try to inject MCP config using home directory as fallback
+                match clux_coord::detect::inject_mcp_config(None, MCP_DEFAULT_PORT) {
+                    Ok(path) => {
+                        info!(pane_id, ?path, "Injected MCP config for Claude Code");
+                        pane.claude_detector.config_injected = true;
+                    }
+                    Err(e) => {
+                        tracing::error!(pane_id, "Failed to inject MCP config: {e}");
+                    }
+                }
             }
         }
     }
@@ -480,7 +516,7 @@ impl App {
     }
 
     /// Build a status line string for a pane.
-    /// Will be rendered in the status bar when cell rendering is connected.
+    /// Includes agent status from the coordination broker when available.
     #[expect(
         dead_code,
         reason = "will be used when status bar rendering is connected"
@@ -491,11 +527,35 @@ impl App {
             .panes
             .get(&pane_id)
             .map_or("", |p| p.buffer.title.as_str());
-        if title.is_empty() {
-            format!("[{pane_id}] {shell}")
-        } else {
-            format!("[{pane_id}] {shell} - {title}")
+
+        // Check for agent status from coordination broker
+        let agent_status = self.mcp_state.as_ref().and_then(|state| {
+            let peer_id = format!("pane-{pane_id}");
+            state
+                .broker
+                .list_peers(None)
+                .ok()?
+                .into_iter()
+                .find(|p| p.peer_id == peer_id)?
+                .status_text
+        });
+
+        let is_claude = self
+            .panes
+            .get(&pane_id)
+            .is_some_and(|p| p.claude_detector.detected);
+
+        let mut parts = vec![format!("[{pane_id}]")];
+        if is_claude {
+            parts.push("🤖".to_string());
         }
+        parts.push(shell.clone());
+        if let Some(status) = agent_status {
+            parts.push(format!("({status})"));
+        } else if !title.is_empty() {
+            parts.push(format!("- {title}"));
+        }
+        parts.join(" ")
     }
 
     /// Check if a key event is a management shortcut (Ctrl+Shift+...).
@@ -534,6 +594,14 @@ impl App {
             }
             Key::Character(c) if c.as_str() == "W" || c.as_str() == "w" => {
                 self.close_active_pane();
+                true
+            }
+            // Coordination panel toggle
+            Key::Character(c) if c.as_str() == "P" || c.as_str() == "p" => {
+                if let Some(ref mut panel) = self.coord_panel {
+                    panel.toggle();
+                    info!(visible = panel.visible, "Coordination panel toggled");
+                }
                 true
             }
             Key::Named(NamedKey::ArrowRight) => {
