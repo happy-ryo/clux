@@ -4,8 +4,8 @@
 
 set -e
 
-echo "==> Running cargo fmt --check..."
-cargo fmt --check
+echo "==> Running cargo +nightly fmt --check..."
+cargo +nightly fmt --all -- --check
 
 echo "==> Running cargo clippy..."
 cargo clippy --all-targets -- -D warnings
