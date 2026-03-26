@@ -366,8 +366,14 @@ impl TerminalBuffer {
                 }
                 self.erase_in_line(1);
             }
-            2 | 3 => {
-                self.clear_screen();
+            2 => {
+                // Clear entire screen but preserve cursor position (per VT spec)
+                self.cells = vec![vec![Cell::default(); self.cols]; self.rows];
+            }
+            3 => {
+                // Clear screen and scrollback
+                self.cells = vec![vec![Cell::default(); self.cols]; self.rows];
+                self.scrollback.clear();
             }
             _ => {}
         }

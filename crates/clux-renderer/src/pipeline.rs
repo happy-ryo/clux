@@ -5,8 +5,8 @@ use crate::atlas::GlyphAtlas;
 use crate::border::BorderRenderer;
 use crate::cell_renderer::{CellInstance, CellRenderer};
 
-/// Font size in pixels, tuned so Consolas advance width fits `DEFAULT_CELL_WIDTH`.
-const DEFAULT_FONT_SIZE: f32 = 14.0;
+/// Font size in pixels for glyph rasterization.
+const DEFAULT_FONT_SIZE: f32 = 16.0;
 
 /// GPU rendering pipeline state.
 pub struct RenderPipeline {
@@ -122,9 +122,9 @@ impl RenderPipeline {
         DEFAULT_FONT_SIZE
     }
 
-    /// Measure actual cell dimensions from the font.
-    /// Returns `(cell_width, cell_height)` in logical pixels.
-    pub fn measure_cell_size(&mut self) -> (f32, f32) {
+    /// Measure actual cell dimensions and baseline from the font.
+    /// Returns `(cell_width, cell_height, ascent)` in logical pixels.
+    pub fn measure_cell_size(&mut self) -> (f32, f32, f32) {
         self.glyph_atlas.measure_cell_size(DEFAULT_FONT_SIZE)
     }
 

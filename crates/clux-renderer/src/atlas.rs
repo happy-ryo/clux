@@ -28,8 +28,11 @@ pub struct GlyphInfo {
 const FONT_FAMILY: &str = "Consolas";
 
 /// Create font attributes with the configured monospace font.
+/// Falls back to the generic Monospace family if the named font is unavailable.
 fn mono_attrs() -> Attrs<'static> {
-    Attrs::new().family(Family::Name(FONT_FAMILY))
+    Attrs::new()
+        .family(Family::Name(FONT_FAMILY))
+        .weight(cosmic_text::Weight::NORMAL)
 }
 
 /// Row-based packing state for the glyph atlas.
@@ -101,9 +104,10 @@ impl GlyphAtlas {
         atlas
     }
 
-    /// Measure the cell dimensions for a monospace grid based on actual font metrics.
-    /// Returns `(cell_width, cell_height)` in logical pixels.
-    pub fn measure_cell_size(&mut self, font_size: f32) -> (f32, f32) {
+    /// Measure the cell dimensions and baseline for a monospace grid.
+    /// Returns `(cell_width, cell_height, ascent)` in logical pixels.
+    /// `ascent` is the distance from the top of the cell to the baseline.
+    pub fn measure_cell_size(&mut self, font_size: f32) -> (f32, f32, f32) {
         let metrics = Metrics::new(font_size, font_size * 1.2);
         let attrs = mono_attrs();
 
@@ -114,19 +118,22 @@ impl GlyphAtlas {
 
         let mut cell_width = font_size * 0.6; // fallback
         let cell_height = metrics.line_height;
+        // Ascent is approximately 80% of line_height for most fonts
+        let mut ascent = font_size * 0.8;
 
-        for run in buffer.layout_runs() {
+        if let Some(run) = buffer.layout_runs().next() {
+            // line_y is the baseline Y position within the layout
+            ascent = run.line_y;
             if let Some(glyph) = run.glyphs.first() {
                 cell_width = glyph.w;
-                break;
             }
         }
 
         debug!(
             cell_width,
-            cell_height, font_size, "Measured cell size from font metrics"
+            cell_height, ascent, font_size, "Measured cell metrics"
         );
-        (cell_width, cell_height)
+        (cell_width, cell_height, ascent)
     }
 
     fn prepopulate_ascii(&mut self, queue: &wgpu::Queue, font_size: f32) {

@@ -133,9 +133,11 @@ impl ConPty {
         };
 
         let mut flags = PSEUDOCONSOLE_RESIZE_QUIRK | PSEUDOCONSOLE_WIN32_INPUT_MODE;
-        if *PASSTHROUGH_SUPPORTED {
+        let passthrough = *PASSTHROUGH_SUPPORTED;
+        if passthrough {
             flags |= PSEUDOCONSOLE_PASSTHROUGH_MODE;
         }
+        info!(passthrough, flags, "ConPTY flags");
 
         let console = unsafe {
             CreatePseudoConsole(size, pty_input_read, pty_output_write, flags)
