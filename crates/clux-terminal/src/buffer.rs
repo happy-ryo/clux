@@ -920,25 +920,28 @@ mod tests {
     fn unicode_cjk_characters() {
         let mut buf = TerminalBuffer::new(20, 5);
         buf.set_cursor_pos(0, 0);
-        // CJK characters (each typically 2 cells wide, but we store per-cell)
+        // CJK characters are 2 cells wide each
         for c in "日本語テスト".chars() {
             buf.put_char(c);
         }
         assert_eq!(buf.cells[0][0].c, '日');
-        assert_eq!(buf.cells[0][1].c, '本');
-        assert_eq!(buf.cells[0][5].c, 'ト');
+        assert!(buf.cells[0][0].is_wide);
+        assert!(buf.cells[0][1].wide_continuation); // continuation cell
+        assert_eq!(buf.cells[0][2].c, '本'); // next char at col 2
+        assert_eq!(buf.cells[0][10].c, 'ト'); // 6th char at col 10
     }
 
     #[test]
     fn emoji_in_buffer() {
         let mut buf = TerminalBuffer::new(20, 5);
         buf.set_cursor_pos(0, 0);
-        buf.put_char('🚀');
-        buf.put_char('✨');
-        buf.put_char('🎉');
+        buf.put_char('🚀'); // wide (2 cells)
+        buf.put_char('✨'); // wide (2 cells)
+        buf.put_char('🎉'); // wide (2 cells)
         assert_eq!(buf.cells[0][0].c, '🚀');
-        assert_eq!(buf.cells[0][1].c, '✨');
-        assert_eq!(buf.cells[0][2].c, '🎉');
+        assert!(buf.cells[0][0].is_wide);
+        assert_eq!(buf.cells[0][2].c, '✨');
+        assert_eq!(buf.cells[0][4].c, '🎉');
     }
 
     #[test]
