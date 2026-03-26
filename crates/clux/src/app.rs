@@ -99,6 +99,8 @@ struct App {
     frame_count: u64,
     /// Whether the cursor is currently visible (for blinking).
     cursor_visible: bool,
+    /// Current IME preedit (composition) text, displayed as overlay at cursor.
+    ime_preedit: String,
 }
 
 impl App {
@@ -128,6 +130,7 @@ impl App {
             cells_dirty: true,
             frame_count: 0,
             cursor_visible: true,
+            ime_preedit: String::new(),
         }
     }
 
@@ -470,6 +473,84 @@ impl App {
     }
 
     /// Build the list of cell instances for GPU rendering from all visible panes.
+    /// Build cell instances for the IME preedit (composition) overlay.
+    fn build_preedit_instances(&mut self) -> Vec<CellInstance> {
+        if self.ime_preedit.is_empty() || self.renderer.is_none() {
+            return Vec::new();
+        }
+
+        let Some(rect) = self.active_pane_rect() else {
+            return Vec::new();
+        };
+        let active_id = self.tabs[self.active_tab].active_pane;
+        let Some(pane) = self.panes.get(&active_id) else {
+            return Vec::new();
+        };
+
+        let cell_w = self.cell_width;
+        let cell_h = self.cell_height;
+        let cursor_x = rect.x + pane.buffer.cursor.col as f32 * cell_w;
+        let cursor_y = rect.y + pane.buffer.cursor.row as f32 * cell_h;
+
+        let mut instances = Vec::new();
+        let mut glyph_requests = Vec::new();
+
+        // Background bar for the preedit text
+        let preedit_width = self.ime_preedit.len() as f32 * cell_w;
+        instances.push(CellInstance::background(
+            cursor_x,
+            cursor_y,
+            preedit_width.max(cell_w),
+            cell_h,
+            0.2,
+            0.2,
+            0.4,
+        ));
+
+        // Characters
+        let mut x = cursor_x;
+        for c in self.ime_preedit.chars() {
+            use unicode_width::UnicodeWidthChar;
+            let w = c.width().unwrap_or(1);
+            let char_w = cell_w * w as f32;
+
+            // Background per character
+            instances.push(CellInstance::background(
+                x, cursor_y, char_w, cell_h, 0.2, 0.2, 0.4,
+            ));
+
+            glyph_requests.push(GlyphRequest {
+                px: x,
+                py: cursor_y,
+                c,
+                fg_r: 1.0,
+                fg_g: 1.0,
+                fg_b: 0.5,
+            });
+            x += char_w;
+        }
+
+        // Underline indicator
+        instances.push(CellInstance::background(
+            cursor_x,
+            cursor_y + cell_h - 2.0,
+            x - cursor_x,
+            2.0,
+            1.0,
+            1.0,
+            0.5,
+        ));
+
+        Self::resolve_glyphs(
+            self.renderer.as_mut().expect("checked above"),
+            &glyph_requests,
+            cell_h,
+            &mut instances,
+        );
+
+        instances
+    }
+
     fn build_cell_instances(&mut self) -> Vec<CellInstance> {
         if self.renderer.is_none() {
             return Vec::new();
@@ -986,6 +1067,7 @@ impl App {
                 self.update_ime_cursor_area();
             }
             winit::event::Ime::Commit(text) => {
+                self.ime_preedit.clear();
                 let active_id = self.tab().active_pane;
                 if let Some(pane) = self.panes.get(&active_id) {
                     pane.terminal.write(text.as_bytes());
@@ -994,9 +1076,8 @@ impl App {
                 self.cells_dirty = true;
             }
             winit::event::Ime::Preedit(text, _cursor) => {
-                if !text.is_empty() {
-                    tracing::debug!(text, "IME preedit");
-                }
+                self.ime_preedit = text;
+                self.cells_dirty = true;
                 self.update_ime_cursor_area();
             }
             winit::event::Ime::Disabled => {}
@@ -1190,6 +1271,7 @@ impl ApplicationHandler for App {
                 if self.cells_dirty {
                     let mut cells = self.build_tab_bar_instances();
                     cells.append(&mut self.build_cell_instances());
+                    cells.append(&mut self.build_preedit_instances());
                     self.cached_cells = cells;
                     self.cells_dirty = false;
                 }

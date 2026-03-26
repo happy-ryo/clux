@@ -32,3 +32,4 @@ serde.workspace = true
 toml.workspace = true
 dirs.workspace = true
 arboard.workspace = true
+unicode-width.workspace = true
