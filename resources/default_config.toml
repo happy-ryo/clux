@@ -1,0 +1,41 @@
+# clux - Terminal Multiplexer Configuration
+# Place this file at: %APPDATA%/clux/clux.toml
+
+[shell]
+# Default shell to launch in new panes
+default = "pwsh.exe"
+
+[font]
+# Font family name
+family = "Consolas"
+# Font size in points
+size = 14.0
+
+[colors]
+# Background color (RGB, 0.0-1.0)
+background = [0.118, 0.118, 0.180]
+# Foreground/text color (RGB, 0.0-1.0)
+foreground = [0.847, 0.871, 0.914]
+# Optional: ANSI 16-color palette override (array of 16 RGB triples)
+# palette = [
+#   [0.0, 0.0, 0.0],       # black
+#   [0.8, 0.2, 0.2],       # red
+#   [0.2, 0.8, 0.2],       # green
+#   [0.8, 0.8, 0.2],       # yellow
+#   [0.2, 0.2, 0.8],       # blue
+#   [0.8, 0.2, 0.8],       # magenta
+#   [0.2, 0.8, 0.8],       # cyan
+#   [0.8, 0.8, 0.8],       # white
+#   [0.4, 0.4, 0.4],       # bright black
+#   [1.0, 0.4, 0.4],       # bright red
+#   [0.4, 1.0, 0.4],       # bright green
+#   [1.0, 1.0, 0.4],       # bright yellow
+#   [0.4, 0.4, 1.0],       # bright blue
+#   [1.0, 0.4, 1.0],       # bright magenta
+#   [0.4, 1.0, 1.0],       # bright cyan
+#   [1.0, 1.0, 1.0],       # bright white
+# ]
+
+[scrollback]
+# Maximum number of scrollback lines per pane
+max_lines = 10000

@@ -26,3 +26,7 @@ crossbeam-channel.workspace = true
 pollster.workspace = true
 serde_json.workspace = true
 vte = { workspace = true }
+serde.workspace = true
+toml.workspace = true
+dirs.workspace = true
+arboard.workspace = true
