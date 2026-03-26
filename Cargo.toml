@@ -1,0 +1,67 @@
+[workspace]
+members = [
+    "crates/clux",
+    "crates/clux-terminal",
+    "crates/clux-renderer",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/happy-ryo/clux"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Allow common patterns
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_possible_wrap = "allow"
+needless_pass_by_value = "allow"
+items_after_statements = "allow"
+
+[workspace.dependencies]
+# Terminal
+vte = "0.15"
+crossbeam-channel = "0.5"
+
+# Rendering
+wgpu = "25"
+winit = "0.30"
+cosmic-text = "0.12"
+
+# Windows APIs
+windows = { version = "0.61", features = [
+    "Win32_System_Console",
+    "Win32_System_Threading",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_Foundation",
+] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Async
+pollster = "0.4"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"

@@ -1,0 +1,25 @@
+[package]
+name = "clux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "clux"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+clux-terminal = { path = "../clux-terminal" }
+clux-renderer = { path = "../clux-renderer" }
+
+winit.workspace = true
+wgpu.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+crossbeam-channel.workspace = true
+pollster.workspace = true
+vte = { workspace = true }
