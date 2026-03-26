@@ -33,7 +33,8 @@ struct PaneState {
 struct App {
     window: Option<Arc<Window>>,
     renderer: Option<RenderPipeline>,
-    tab: Tab,
+    tabs: Vec<Tab>,
+    active_tab: usize,
     panes: HashMap<PaneId, PaneState>,
     resize_debouncer: ResizeDebouncer,
     cell_width: f32,
@@ -41,6 +42,8 @@ struct App {
     scale_factor: f64,
     modifiers: ModifiersState,
     cursor_position: (f64, f64),
+    /// Global pane ID counter (shared across all tabs).
+    next_global_pane_id: PaneId,
 }
 
 impl App {
@@ -48,7 +51,8 @@ impl App {
         Self {
             window: None,
             renderer: None,
-            tab: Tab::new("main"),
+            tabs: Vec::new(),
+            active_tab: 0,
             panes: HashMap::new(),
             resize_debouncer: ResizeDebouncer::new(50),
             cell_width: DEFAULT_CELL_WIDTH,
@@ -56,56 +60,101 @@ impl App {
             scale_factor: 1.0,
             modifiers: ModifiersState::empty(),
             cursor_position: (0.0, 0.0),
+            next_global_pane_id: 0,
         }
     }
 
-    fn spawn_pane(&mut self, cols: u16, rows: u16) -> Option<PaneId> {
-        // The Tab already assigned a PaneId when it was created or split.
-        // We need to find which pane IDs exist in the tab but not in our HashMap.
-        let tab_ids = self.tab.all_pane_rects(Rect::new(0.0, 0.0, 1.0, 1.0));
-        for (pane_id, _) in &tab_ids {
-            if !self.panes.contains_key(pane_id) {
-                match ConPty::spawn(cols, rows, "pwsh.exe") {
-                    Ok(terminal) => {
-                        info!(pane_id, "Spawned ConPTY for pane");
-                        self.panes.insert(
-                            *pane_id,
-                            PaneState {
-                                terminal,
-                                buffer: TerminalBuffer::new(cols as usize, rows as usize),
-                                vt_parser: vte::Parser::new(),
-                            },
-                        );
-                        return Some(*pane_id);
-                    }
-                    Err(e) => {
-                        tracing::error!(pane_id, "Failed to spawn terminal: {e}");
-                        return None;
-                    }
-                }
+    fn tab(&self) -> &Tab {
+        &self.tabs[self.active_tab]
+    }
+
+    fn tab_mut(&mut self) -> &mut Tab {
+        &mut self.tabs[self.active_tab]
+    }
+
+    fn create_tab(&mut self, name: impl Into<String>) {
+        let pane_id = self.next_global_pane_id;
+        self.next_global_pane_id += 1;
+        let tab = Tab::with_pane_id(name, pane_id);
+        self.tabs.push(tab);
+        self.active_tab = self.tabs.len() - 1;
+        self.spawn_pane_for_id(pane_id, DEFAULT_COLS, DEFAULT_ROWS);
+        info!(tab_index = self.active_tab, pane_id, "New tab created");
+    }
+
+    fn close_active_tab(&mut self) {
+        if self.tabs.len() <= 1 {
+            info!("Cannot close the last tab");
+            return;
+        }
+        // Collect pane IDs from the tab being closed
+        let viewport = self.viewport();
+        let pane_ids: Vec<PaneId> = self.tabs[self.active_tab]
+            .all_pane_rects(viewport)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+
+        // Remove all panes (ConPty auto-cleanup via Drop)
+        for id in &pane_ids {
+            self.panes.remove(id);
+        }
+
+        let closed_idx = self.active_tab;
+        self.tabs.remove(closed_idx);
+        // Adjust active_tab index
+        if self.active_tab >= self.tabs.len() {
+            self.active_tab = self.tabs.len() - 1;
+        }
+        info!(closed = closed_idx, active = self.active_tab, "Tab closed");
+        self.resize_all_panes();
+    }
+
+    fn switch_tab(&mut self, index: usize) {
+        if index < self.tabs.len() && index != self.active_tab {
+            self.active_tab = index;
+            info!(active = index, "Switched to tab");
+            self.resize_all_panes();
+        }
+    }
+
+    fn spawn_pane_for_id(&mut self, pane_id: PaneId, cols: u16, rows: u16) {
+        match ConPty::spawn(cols, rows, "pwsh.exe") {
+            Ok(terminal) => {
+                info!(pane_id, "Spawned ConPTY for pane");
+                self.panes.insert(
+                    pane_id,
+                    PaneState {
+                        terminal,
+                        buffer: TerminalBuffer::new(cols as usize, rows as usize),
+                        vt_parser: vte::Parser::new(),
+                    },
+                );
+            }
+            Err(e) => {
+                tracing::error!(pane_id, "Failed to spawn terminal: {e}");
             }
         }
-        None
     }
 
     fn close_active_pane(&mut self) {
-        if self.tab.pane_count() <= 1 {
+        if self.tab().pane_count() <= 1 {
             info!("Cannot close the last pane");
             return;
         }
-        let pane_id = self.tab.active_pane;
-        if self.tab.close_pane(pane_id) {
-            // Removing from HashMap drops ConPty, which cleans up the process
+        let pane_id = self.tab().active_pane;
+        if self.tab_mut().close_pane(pane_id) {
             self.panes.remove(&pane_id);
             info!(pane_id, "Pane closed");
         }
     }
 
     fn split_active(&mut self, direction: Direction) {
-        let new_id = self.tab.split_active(direction, 0.5);
+        let new_id = self.next_global_pane_id;
+        self.next_global_pane_id += 1;
+        self.tab_mut().split_active_with_id(direction, 0.5, new_id);
         info!(new_pane_id = new_id, ?direction, "Split active pane");
-        self.spawn_pane(DEFAULT_COLS, DEFAULT_ROWS);
-        // Resize all panes to their new rects
+        self.spawn_pane_for_id(new_id, DEFAULT_COLS, DEFAULT_ROWS);
         self.resize_all_panes();
     }
 
@@ -138,7 +187,8 @@ impl App {
 
     fn resize_all_panes(&mut self) {
         let viewport = self.viewport();
-        for (pane_id, rect) in self.tab.all_pane_rects(viewport) {
+        // Only resize panes in the active tab
+        for (pane_id, rect) in self.tab().all_pane_rects(viewport) {
             if let Some(pane) = self.panes.get_mut(&pane_id) {
                 let (cols, rows) = pixel_size_to_terminal_size(
                     rect.width as u32,
@@ -153,9 +203,9 @@ impl App {
         }
     }
 
-    /// Check if a key event is a pane management shortcut (Ctrl+Shift+...).
+    /// Check if a key event is a management shortcut (Ctrl+Shift+...).
     /// Returns true if the event was handled.
-    fn handle_pane_shortcut(&mut self, event: &winit::event::KeyEvent) -> bool {
+    fn handle_shortcut(&mut self, event: &winit::event::KeyEvent) -> bool {
         if event.state != ElementState::Pressed {
             return false;
         }
@@ -167,6 +217,7 @@ impl App {
         }
 
         match &event.logical_key {
+            // Pane shortcuts
             Key::Character(c) if c.as_str() == "V" || c.as_str() == "v" => {
                 self.split_active(Direction::Vertical);
                 true
@@ -180,14 +231,35 @@ impl App {
                 true
             }
             Key::Named(NamedKey::ArrowRight) => {
-                self.tab.cycle_focus(true);
-                info!(active = self.tab.active_pane, "Focus cycled forward");
+                self.tab_mut().cycle_focus(true);
+                info!(active = self.tab().active_pane, "Focus cycled forward");
                 true
             }
             Key::Named(NamedKey::ArrowLeft) => {
-                self.tab.cycle_focus(false);
-                info!(active = self.tab.active_pane, "Focus cycled backward");
+                self.tab_mut().cycle_focus(false);
+                info!(active = self.tab().active_pane, "Focus cycled backward");
                 true
+            }
+            // Tab shortcuts
+            Key::Character(c) if c.as_str() == "T" || c.as_str() == "t" => {
+                let name = format!("tab-{}", self.tabs.len());
+                self.create_tab(name);
+                self.resize_all_panes();
+                true
+            }
+            Key::Character(c) if c.as_str() == "Q" || c.as_str() == "q" => {
+                self.close_active_tab();
+                true
+            }
+            // Ctrl+Shift+1..9 for tab switching
+            Key::Character(c) => {
+                if let Some(digit) = c.as_str().chars().next().and_then(|ch| ch.to_digit(10))
+                    && (1..=9).contains(&digit)
+                {
+                    self.switch_tab((digit - 1) as usize);
+                    return true;
+                }
+                false
             }
             _ => false,
         }
@@ -220,8 +292,8 @@ impl ApplicationHandler for App {
         self.renderer = Some(renderer);
         self.window = Some(window);
 
-        // Spawn the initial pane (Tab::new already created pane_id 0)
-        self.spawn_pane(DEFAULT_COLS, DEFAULT_ROWS);
+        // Create the initial tab with its first pane
+        self.create_tab("main");
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -258,7 +330,6 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 self.process_terminal_output();
 
-                // Apply any pending debounced resize
                 if self.resize_debouncer.poll().is_some() {
                     self.resize_all_panes();
                 }
@@ -270,7 +341,7 @@ impl ApplicationHandler for App {
                         b: 0.180,
                         a: 1.0,
                     };
-                    // TODO: build CellInstance list from all pane buffers
+                    // TODO: build CellInstance list from all pane buffers + tab bar
                     if let Err(e) = renderer.render_frame(bg, &[]) {
                         tracing::error!("Render error: {e}");
                     }
@@ -291,22 +362,20 @@ impl ApplicationHandler for App {
             } => {
                 let viewport = self.viewport();
                 let (x, y) = self.cursor_position;
-                if self.tab.focus_at(x as f32, y as f32, viewport) {
+                if self.tab_mut().focus_at(x as f32, y as f32, viewport) {
                     info!(
-                        active = self.tab.active_pane,
+                        active = self.tab().active_pane,
                         "Focus changed via mouse click"
                     );
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                // Check pane shortcuts first
-                if self.handle_pane_shortcut(&event) {
+                if self.handle_shortcut(&event) {
                     return;
                 }
 
-                // Forward to active pane's terminal
                 if event.state == ElementState::Pressed
-                    && let Some(pane) = self.panes.get(&self.tab.active_pane)
+                    && let Some(pane) = self.panes.get(&self.tab().active_pane)
                 {
                     if let Some(bytes) = key_event_to_bytes(&event, self.modifiers) {
                         pane.terminal.write(&bytes);
