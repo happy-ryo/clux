@@ -1,0 +1,89 @@
+<?xml version='1.0' encoding='windows-1252'?>
+<!--
+  Copyright (C) 2024 clux contributors
+  Licensed under MIT license
+-->
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+    <Product
+        Id='*'
+        Name='clux'
+        UpgradeCode='E8F1B4A2-3C5D-4E6F-A7B8-9D0E1F2A3B4C'
+        Manufacturer='clux contributors'
+        Language='1033'
+        Codepage='1252'
+        Version='0.1.0'>
+
+        <Package Id='*'
+            Keywords='Installer'
+            Description='clux - AI Agent-Collaborative Terminal Multiplexer for Windows'
+            Manufacturer='clux contributors'
+            InstallerVersion='450'
+            Languages='1033'
+            Compressed='yes'
+            InstallScope='perMachine'
+            SummaryCodepage='1252' />
+
+        <MajorUpgrade
+            Schedule='afterInstallInitialize'
+            DowngradeErrorMessage='A newer version of [ProductName] is already installed. Setup will now exit.' />
+
+        <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1' />
+        <Property Id='DiskPrompt' Value='clux Installation' />
+
+        <Directory Id='TARGETDIR' Name='SourceDir'>
+            <Directory Id='ProgramFiles64Folder' Name='PFiles'>
+                <Directory Id='APPLICATIONFOLDER' Name='clux'>
+                    <Component Id='CluxExe' Guid='*'>
+                        <File
+                            Id='CluxEXE'
+                            Name='clux.exe'
+                            DiskId='1'
+                            Source='target\release\clux.exe'
+                            KeyPath='yes' />
+                    </Component>
+                </Directory>
+            </Directory>
+
+            <!-- Add to PATH -->
+            <Component Id='Path' Guid='A1B2C3D4-E5F6-7890-ABCD-EF1234567890' KeyPath='yes'>
+                <Environment
+                    Id='PATH'
+                    Name='PATH'
+                    Value='[APPLICATIONFOLDER]'
+                    Permanent='no'
+                    Part='last'
+                    Action='set'
+                    System='yes' />
+            </Component>
+        </Directory>
+
+        <Feature Id='Binaries'
+            Title='Application'
+            Description='Installs clux.exe'
+            Level='1'
+            ConfigurableDirectory='APPLICATIONFOLDER'
+            AllowAdvertise='no'
+            Display='expand'
+            Absent='disallow'>
+            <ComponentRef Id='CluxExe' />
+            <Feature Id='Environment'
+                Title='PATH Environment Variable'
+                Description='Add clux to the system PATH'
+                Level='1'
+                Absent='allow'>
+                <ComponentRef Id='Path' />
+            </Feature>
+        </Feature>
+
+        <SetProperty Id='ARPINSTALLLOCATION' Value='[APPLICATIONFOLDER]' After='CostFinalize' />
+
+        <Icon Id='ProductICO' SourceFile='target\release\clux.exe' />
+        <Property Id='ARPPRODUCTICON' Value='ProductICO' />
+
+        <UI>
+            <UIRef Id='WixUI_FeatureTree' />
+        </UI>
+
+        <WixVariable Id='WixUILicenseRtf' Value='wix\License.rtf' />
+    </Product>
+</Wix>
