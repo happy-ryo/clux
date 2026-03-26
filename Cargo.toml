@@ -39,6 +39,7 @@ crossbeam-channel = "0.5"
 wgpu = "25"
 winit = "0.30"
 cosmic-text = "0.12"
+bytemuck = { version = "1", features = ["derive"] }
 
 # Windows APIs
 windows = { version = "0.61", features = [

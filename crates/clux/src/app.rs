@@ -113,14 +113,15 @@ impl ApplicationHandler for App {
                     self.buffer.resize(cols as usize, rows as usize);
                 }
 
-                if let Some(ref renderer) = self.renderer {
+                if let Some(ref mut renderer) = self.renderer {
                     let bg = wgpu::Color {
                         r: 0.118,
                         g: 0.118,
                         b: 0.180,
                         a: 1.0,
                     };
-                    if let Err(e) = renderer.render_frame(bg) {
+                    // TODO: build CellInstance list from terminal buffer
+                    if let Err(e) = renderer.render_frame(bg, &[]) {
                         tracing::error!("Render error: {}", e);
                     }
                 }
