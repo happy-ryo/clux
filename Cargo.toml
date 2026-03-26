@@ -72,9 +72,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Async
 pollster = "0.4"
 
-# Directories
-dirs = "6"
-
 # Error handling
 anyhow = "1"
 thiserror = "2"
