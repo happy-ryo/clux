@@ -1191,8 +1191,13 @@ impl ApplicationHandler for App {
 
         self.scale_factor = window.scale_factor();
 
-        let renderer = pollster::block_on(RenderPipeline::new(Arc::clone(&window)))
+        let mut renderer = pollster::block_on(RenderPipeline::new(Arc::clone(&window)))
             .expect("Failed to initialize GPU renderer");
+
+        // Use actual font metrics for cell size so glyphs aren't squished
+        let (mw, mh) = renderer.measure_cell_size();
+        self.cell_width = mw;
+        self.cell_height = mh;
 
         info!(
             scale_factor = self.scale_factor,
