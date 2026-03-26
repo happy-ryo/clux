@@ -118,6 +118,10 @@ pub struct TerminalBuffer {
 
     // Window title (set via OSC)
     pub title: String,
+
+    /// Current scroll offset (0 = at the bottom / live view).
+    /// Positive values scroll back into history.
+    pub scroll_offset: usize,
 }
 
 impl TerminalBuffer {
@@ -145,6 +149,7 @@ impl TerminalBuffer {
             insert_mode: false,
             tab_stops,
             title: String::new(),
+            scroll_offset: 0,
         }
     }
 
@@ -501,6 +506,54 @@ impl TerminalBuffer {
 
     pub fn set_title(&mut self, title: String) {
         self.title = title;
+    }
+
+    // --- Scroll offset (user-initiated scrollback viewing) ---
+
+    /// Scroll the viewport up (into scrollback history) by `n` lines.
+    pub fn scroll_view_up(&mut self, n: usize) {
+        let max_offset = self.scrollback.len();
+        self.scroll_offset = (self.scroll_offset + n).min(max_offset);
+    }
+
+    /// Scroll the viewport down (toward present) by `n` lines.
+    pub fn scroll_view_down(&mut self, n: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(n);
+    }
+
+    /// Reset scroll offset to show the live view.
+    pub fn reset_scroll(&mut self) {
+        self.scroll_offset = 0;
+    }
+
+    /// Return the visible lines for rendering, accounting for scroll offset.
+    /// When `scroll_offset == 0`, this returns the live screen buffer.
+    /// When scrolled back, it blends scrollback history with the top of the screen.
+    pub fn visible_lines(&self) -> Vec<&Vec<Cell>> {
+        if self.scroll_offset == 0 {
+            return self.cells.iter().collect();
+        }
+
+        let sb_len = self.scrollback.len();
+        let offset = self.scroll_offset.min(sb_len);
+
+        let mut lines: Vec<&Vec<Cell>> = Vec::with_capacity(self.rows);
+
+        // How many scrollback lines are visible
+        let sb_visible = offset.min(self.rows);
+        let sb_start = sb_len.saturating_sub(offset);
+
+        for line in self.scrollback.iter().skip(sb_start).take(sb_visible) {
+            lines.push(line);
+        }
+
+        // Fill remaining rows from the live screen buffer
+        let screen_lines = self.rows.saturating_sub(sb_visible);
+        for line in self.cells.iter().take(screen_lines) {
+            lines.push(line);
+        }
+
+        lines
     }
 }
 

@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use tracing::info;
+use tracing::{info, warn};
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
@@ -23,8 +23,14 @@ use clux_terminal::terminal_size::{
     DEFAULT_CELL_HEIGHT, DEFAULT_CELL_WIDTH, pixel_size_to_terminal_size,
 };
 
+use crate::config::Config;
+use crate::selection::{CellCoord, Selection, extract_text, pixel_to_cell};
+
 const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 30;
+
+/// Number of lines to scroll per mouse wheel tick.
+const SCROLL_LINES_PER_TICK: usize = 3;
 
 struct PaneState {
     terminal: ConPty,
@@ -35,6 +41,7 @@ struct PaneState {
 const SESSION_NAME: &str = "default";
 
 struct App {
+    config: Config,
     window: Option<Arc<Window>>,
     renderer: Option<RenderPipeline>,
     tabs: Vec<Tab>,
@@ -49,11 +56,18 @@ struct App {
     cursor_position: (f64, f64),
     /// Global pane ID counter (shared across all tabs).
     next_global_pane_id: PaneId,
+    /// Current text selection state.
+    selection: Option<Selection>,
+    /// Whether the left mouse button is currently held for drag-selection.
+    mouse_dragging: bool,
+    /// Clipboard handle (lazily initialized).
+    clipboard: Option<arboard::Clipboard>,
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(config: Config) -> Self {
         Self {
+            config,
             window: None,
             renderer: None,
             tabs: Vec::new(),
@@ -67,6 +81,9 @@ impl App {
             modifiers: ModifiersState::empty(),
             cursor_position: (0.0, 0.0),
             next_global_pane_id: 0,
+            selection: None,
+            mouse_dragging: false,
+            clipboard: None,
         }
     }
 
@@ -127,14 +144,17 @@ impl App {
     }
 
     fn spawn_pane_for_id(&mut self, pane_id: PaneId, cols: u16, rows: u16) {
-        match ConPty::spawn(cols, rows, "pwsh.exe") {
+        let shell = &self.config.shell.default;
+        match ConPty::spawn(cols, rows, shell) {
             Ok(terminal) => {
-                info!(pane_id, "Spawned ConPTY for pane");
+                info!(pane_id, shell, "Spawned ConPTY for pane");
+                let mut buffer = TerminalBuffer::new(cols as usize, rows as usize);
+                buffer.scrollback_max = self.config.scrollback.max_lines;
                 self.panes.insert(
                     pane_id,
                     PaneState {
                         terminal,
-                        buffer: TerminalBuffer::new(cols as usize, rows as usize),
+                        buffer,
                         vt_parser: vte::Parser::new(),
                     },
                 );
@@ -170,12 +190,21 @@ impl App {
 
     fn process_terminal_output(&mut self) {
         for pane in self.panes.values_mut() {
-            while let Some(data) = pane.terminal.try_read() {
-                clux_terminal::vt_parser::process_bytes(
-                    &mut pane.vt_parser,
-                    &mut pane.buffer,
-                    &data,
-                );
+            let had_output = {
+                let mut received = false;
+                while let Some(data) = pane.terminal.try_read() {
+                    clux_terminal::vt_parser::process_bytes(
+                        &mut pane.vt_parser,
+                        &mut pane.buffer,
+                        &data,
+                    );
+                    received = true;
+                }
+                received
+            };
+            // Reset scroll offset when new output arrives (user is at live view)
+            if had_output && pane.buffer.scroll_offset > 0 {
+                pane.buffer.reset_scroll();
             }
         }
     }
@@ -259,6 +288,122 @@ impl App {
         }
     }
 
+    /// Get the pane rect for the active pane in the current viewport.
+    fn active_pane_rect(&self) -> Option<Rect> {
+        let viewport = self.viewport();
+        let active_id = self.tab().active_pane;
+        self.tab()
+            .all_pane_rects(viewport)
+            .into_iter()
+            .find(|(id, _)| *id == active_id)
+            .map(|(_, rect)| rect)
+    }
+
+    /// Convert cursor pixel position to cell coordinate relative to active pane.
+    fn cursor_to_cell(&self) -> Option<CellCoord> {
+        let rect = self.active_pane_rect()?;
+        Some(pixel_to_cell(
+            self.cursor_position.0,
+            self.cursor_position.1,
+            rect.x,
+            rect.y,
+            self.cell_width,
+            self.cell_height,
+            self.scale_factor,
+        ))
+    }
+
+    /// Get or create the clipboard handle.
+    fn clipboard(&mut self) -> Option<&mut arboard::Clipboard> {
+        if self.clipboard.is_none() {
+            match arboard::Clipboard::new() {
+                Ok(cb) => self.clipboard = Some(cb),
+                Err(e) => {
+                    warn!(%e, "Failed to initialize clipboard");
+                    return None;
+                }
+            }
+        }
+        self.clipboard.as_mut()
+    }
+
+    /// Copy the current selection to the system clipboard.
+    fn copy_selection(&mut self) {
+        let Some(ref sel) = self.selection else {
+            return;
+        };
+        if sel.is_empty() {
+            return;
+        }
+
+        let active_id = self.tab().active_pane;
+        let text = if let Some(pane) = self.panes.get(&active_id) {
+            let (start, end) = sel.ordered();
+            let visible = pane.buffer.visible_lines();
+            let owned: Vec<Vec<clux_terminal::buffer::Cell>> =
+                visible.into_iter().cloned().collect();
+            extract_text(&owned, start, end, pane.buffer.cols)
+        } else {
+            return;
+        };
+
+        if text.is_empty() {
+            return;
+        }
+
+        if let Some(cb) = self.clipboard() {
+            if let Err(e) = cb.set_text(&text) {
+                warn!(%e, "Failed to copy to clipboard");
+            } else {
+                info!(len = text.len(), "Copied selection to clipboard");
+            }
+        }
+    }
+
+    /// Paste text from the system clipboard into the active pane.
+    fn paste_clipboard(&mut self) {
+        let text = if let Some(cb) = self.clipboard() {
+            match cb.get_text() {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!(%e, "Failed to read clipboard");
+                    return;
+                }
+            }
+        } else {
+            return;
+        };
+
+        if text.is_empty() {
+            return;
+        }
+
+        let active_id = self.tab().active_pane;
+        if let Some(pane) = self.panes.get(&active_id) {
+            pane.terminal.write(text.as_bytes());
+            info!(len = text.len(), "Pasted from clipboard");
+        }
+    }
+
+    /// Build a status line string for a pane.
+    /// Will be rendered in the status bar when cell rendering is connected.
+    #[expect(
+        dead_code,
+        reason = "will be used when status bar rendering is connected"
+    )]
+    pub fn pane_status_text(&self, pane_id: PaneId) -> String {
+        let shell = &self.config.shell.default;
+        let title = self
+            .panes
+            .get(&pane_id)
+            .map_or("", |p| p.buffer.title.as_str());
+        if title.is_empty() {
+            format!("[{pane_id}] {shell}")
+        } else {
+            format!("[{pane_id}] {shell} - {title}")
+        }
+    }
+
     /// Check if a key event is a management shortcut (Ctrl+Shift+...).
     /// Returns true if the event was handled.
     fn handle_shortcut(&mut self, event: &winit::event::KeyEvent) -> bool {
@@ -273,8 +418,19 @@ impl App {
         }
 
         match &event.logical_key {
-            // Pane shortcuts
+            // Copy / Paste
+            Key::Character(c) if c.as_str() == "C" || c.as_str() == "c" => {
+                self.copy_selection();
+                true
+            }
+            // Note: Ctrl+Shift+V was previously used for vertical split.
+            // We reassign it to paste. Vertical split moves to Ctrl+Shift+B (bar split).
             Key::Character(c) if c.as_str() == "V" || c.as_str() == "v" => {
+                self.paste_clipboard();
+                true
+            }
+            // Pane shortcuts (vertical split now uses B for "bar")
+            Key::Character(c) if c.as_str() == "B" || c.as_str() == "b" => {
                 self.split_active(Direction::Vertical);
                 true
             }
@@ -318,6 +474,122 @@ impl App {
                 false
             }
             _ => false,
+        }
+    }
+
+    /// Update drag selection when the cursor moves.
+    fn handle_cursor_drag(&mut self) {
+        if self.mouse_dragging
+            && let Some(coord) = self.cursor_to_cell()
+            && let Some(ref mut sel) = self.selection
+        {
+            sel.end = coord;
+        }
+    }
+
+    /// Handle mouse button press/release for focus and text selection.
+    fn handle_mouse_input(&mut self, state: ElementState, button: MouseButton) {
+        if button != MouseButton::Left {
+            return;
+        }
+        if state == ElementState::Pressed {
+            let viewport = self.viewport();
+            let (x, y) = self.cursor_position;
+            if self.tab_mut().focus_at(x as f32, y as f32, viewport) {
+                info!(
+                    active = self.tab().active_pane,
+                    "Focus changed via mouse click"
+                );
+            }
+            if let Some(coord) = self.cursor_to_cell() {
+                self.selection = Some(Selection::new(coord));
+                self.mouse_dragging = true;
+            }
+        } else {
+            self.mouse_dragging = false;
+            if let Some(coord) = self.cursor_to_cell()
+                && let Some(ref mut sel) = self.selection
+            {
+                sel.end = coord;
+            }
+        }
+    }
+
+    /// Handle IME composition events.
+    fn handle_ime(&mut self, ime: winit::event::Ime) {
+        match ime {
+            winit::event::Ime::Commit(text) => {
+                let active_id = self.tab().active_pane;
+                if let Some(pane) = self.panes.get(&active_id) {
+                    pane.terminal.write(text.as_bytes());
+                    info!(len = text.len(), "IME commit forwarded to pane");
+                }
+            }
+            winit::event::Ime::Preedit(text, _cursor) => {
+                if !text.is_empty() {
+                    tracing::debug!(text, "IME preedit");
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Handle keyboard input events.
+    fn handle_keyboard(&mut self, event: winit::event::KeyEvent) {
+        if self.handle_shortcut(&event) {
+            return;
+        }
+        if event.state == ElementState::Pressed
+            && let Some(pane) = self.panes.get(&self.tab().active_pane)
+        {
+            if let Some(bytes) = key_event_to_bytes(&event, self.modifiers) {
+                pane.terminal.write(&bytes);
+            } else if let Some(ref text) = event.text {
+                pane.terminal.write(text.as_bytes());
+            }
+        }
+    }
+
+    /// Handle mouse wheel scrolling for the active pane's scrollback.
+    fn handle_mouse_wheel(&mut self, delta: MouseScrollDelta) {
+        let lines = match delta {
+            MouseScrollDelta::LineDelta(_, y) => {
+                if y > 0.0 {
+                    // Scroll up (into history)
+                    Some((true, (y.abs() as usize) * SCROLL_LINES_PER_TICK))
+                } else if y < 0.0 {
+                    // Scroll down (toward present)
+                    Some((false, (y.abs() as usize) * SCROLL_LINES_PER_TICK))
+                } else {
+                    None
+                }
+            }
+            MouseScrollDelta::PixelDelta(pos) => {
+                let line_height = f64::from(self.cell_height) * self.scale_factor;
+                if line_height <= 0.0 {
+                    return;
+                }
+                let pixel_lines = (pos.y.abs() / line_height).ceil() as usize;
+                let pixel_lines = pixel_lines.max(1);
+                if pos.y > 0.0 {
+                    Some((true, pixel_lines))
+                } else if pos.y < 0.0 {
+                    Some((false, pixel_lines))
+                } else {
+                    None
+                }
+            }
+        };
+
+        if let Some((up, count)) = lines {
+            let active_id = self.tab().active_pane;
+            if let Some(pane) = self.panes.get_mut(&active_id) {
+                if up {
+                    pane.buffer.scroll_view_up(count);
+                } else {
+                    pane.buffer.scroll_view_down(count);
+                }
+            }
         }
     }
 }
@@ -396,10 +668,11 @@ impl ApplicationHandler for App {
                 }
 
                 if let Some(ref mut renderer) = self.renderer {
+                    let bg_color = &self.config.colors.background;
                     let bg = wgpu::Color {
-                        r: 0.118,
-                        g: 0.118,
-                        b: 0.180,
+                        r: f64::from(bg_color[0]),
+                        g: f64::from(bg_color[1]),
+                        b: f64::from(bg_color[2]),
                         a: 1.0,
                     };
                     // TODO: build CellInstance list from all pane buffers + tab bar
@@ -415,45 +688,38 @@ impl ApplicationHandler for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_position = (position.x, position.y);
+                self.handle_cursor_drag();
             }
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                button: MouseButton::Left,
-                ..
-            } => {
-                let viewport = self.viewport();
-                let (x, y) = self.cursor_position;
-                if self.tab_mut().focus_at(x as f32, y as f32, viewport) {
-                    info!(
-                        active = self.tab().active_pane,
-                        "Focus changed via mouse click"
-                    );
-                }
+            WindowEvent::MouseInput { state, button, .. } => {
+                self.handle_mouse_input(state, button);
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                self.handle_mouse_wheel(delta);
+            }
+            WindowEvent::Ime(ime) => {
+                self.handle_ime(ime);
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                if self.handle_shortcut(&event) {
-                    return;
-                }
-
-                if event.state == ElementState::Pressed
-                    && let Some(pane) = self.panes.get(&self.tab().active_pane)
-                {
-                    if let Some(bytes) = key_event_to_bytes(&event, self.modifiers) {
-                        pane.terminal.write(&bytes);
-                    } else if let Some(ref text) = event.text {
-                        pane.terminal.write(text.as_bytes());
-                    }
-                }
+                self.handle_keyboard(event);
             }
             _ => {}
         }
     }
 }
 
-pub fn run() -> Result<()> {
+pub fn run(config: Config) -> Result<()> {
     info!("Starting clux");
+
+    info!(
+        shell = %config.shell.default,
+        font = %config.font.family,
+        font_size = config.font.size,
+        scrollback = config.scrollback.max_lines,
+        "Configuration loaded"
+    );
+
     let event_loop = EventLoop::new()?;
-    let mut app = App::new();
+    let mut app = App::new(config);
     event_loop.run_app(&mut app)?;
     Ok(())
 }
