@@ -381,11 +381,14 @@ impl App {
     }
 
     /// Viewport for pane content (below the tab bar).
+    /// Width and height are clamped to at least 1.0 to prevent negative dimensions.
     fn viewport(&self) -> Rect {
         if let Some(ref window) = self.window {
             let size = window.inner_size();
             let bar_h = TAB_BAR_HEIGHT * self.scale_factor as f32;
-            Rect::new(0.0, bar_h, size.width as f32, size.height as f32 - bar_h)
+            let w = (size.width as f32).max(1.0);
+            let h = (size.height as f32 - bar_h).max(1.0);
+            Rect::new(0.0, bar_h, w, h)
         } else {
             let bar_h = TAB_BAR_HEIGHT;
             Rect::new(0.0, bar_h, 800.0, 600.0 - bar_h)
@@ -496,6 +499,10 @@ impl App {
         let active_pane_id = self.tabs[self.active_tab].active_pane;
 
         for (pane_id, rect) in &pane_rects {
+            // Skip panes too small to render even one cell
+            if rect.width < cell_w || rect.height < cell_h {
+                continue;
+            }
             let Some(pane) = self.panes.get(pane_id) else {
                 continue;
             };
@@ -608,8 +615,8 @@ impl App {
             .filter_map(|(pane_id, rect)| {
                 self.panes.get(&pane_id).map(|_pane| {
                     let (cols, rows) = pixel_size_to_terminal_size(
-                        rect.width as u32,
-                        rect.height as u32,
+                        rect.width.max(0.0) as u32,
+                        rect.height.max(0.0) as u32,
                         self.cell_width,
                         self.cell_height,
                         self.scale_factor,
@@ -649,8 +656,8 @@ impl App {
         for (pane_id, rect) in self.tab().all_pane_rects(viewport) {
             if let Some(pane) = self.panes.get_mut(&pane_id) {
                 let (cols, rows) = pixel_size_to_terminal_size(
-                    rect.width as u32,
-                    rect.height as u32,
+                    rect.width.max(0.0) as u32,
+                    rect.height.max(0.0) as u32,
                     self.cell_width,
                     self.cell_height,
                     self.scale_factor,
