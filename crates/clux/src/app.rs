@@ -50,6 +50,16 @@ struct PaneState {
 
 const SESSION_NAME: &str = "default";
 
+/// A pending glyph to resolve from the atlas after collecting all cells.
+struct GlyphRequest {
+    px: f32,
+    py: f32,
+    c: char,
+    fg_r: f32,
+    fg_g: f32,
+    fg_b: f32,
+}
+
 struct App {
     config: Config,
     window: Option<Arc<Window>>,
@@ -84,6 +94,8 @@ struct App {
     cells_dirty: bool,
     /// Frame counter for throttling expensive operations.
     frame_count: u64,
+    /// Whether the cursor is currently visible (for blinking).
+    cursor_visible: bool,
 }
 
 impl App {
@@ -112,6 +124,7 @@ impl App {
             cached_cells: Vec::new(),
             cells_dirty: true,
             frame_count: 0,
+            cursor_visible: true,
         }
     }
 
@@ -393,57 +406,91 @@ impl App {
             })
             .sum();
         let mut instances = Vec::with_capacity(estimated);
-
-        struct GlyphRequest {
-            px: f32,
-            py: f32,
-            c: char,
-            fg_r: f32,
-            fg_g: f32,
-            fg_b: f32,
-        }
         let mut glyph_requests: Vec<GlyphRequest> = Vec::new();
+
+        let active_pane_id = self.tabs[self.active_tab].active_pane;
 
         for (pane_id, rect) in &pane_rects {
             let Some(pane) = self.panes.get(pane_id) else {
                 continue;
             };
+            let cursor_col = pane.buffer.cursor.col;
+            let cursor_row = pane.buffer.cursor.row;
+            let is_active = *pane_id == active_pane_id;
+            // Only show cursor when at live view (not scrolled back)
+            let show_cursor = is_active && pane.buffer.scroll_offset == 0 && self.cursor_visible;
+
             let visible = pane.buffer.visible_lines();
             for (row_idx, row) in visible.iter().enumerate() {
                 for (col_idx, cell) in row.iter().enumerate() {
                     let px = rect.x + col_idx as f32 * cell_w;
                     let py = rect.y + row_idx as f32 * cell_h;
 
-                    let bg = &cell.bg;
+                    // Cursor: invert colors at cursor position
+                    let at_cursor = show_cursor && col_idx == cursor_col && row_idx == cursor_row;
+
+                    let (bg_r, bg_g, bg_b, fg_r, fg_g, fg_b) = if at_cursor {
+                        // Invert: use foreground color as background, background as foreground
+                        let fg = &cell.fg;
+                        let bg = &cell.bg;
+                        (
+                            f32::from(fg.r) / 255.0,
+                            f32::from(fg.g) / 255.0,
+                            f32::from(fg.b) / 255.0,
+                            f32::from(bg.r) / 255.0,
+                            f32::from(bg.g) / 255.0,
+                            f32::from(bg.b) / 255.0,
+                        )
+                    } else {
+                        let bg = &cell.bg;
+                        let fg = &cell.fg;
+                        (
+                            f32::from(bg.r) / 255.0,
+                            f32::from(bg.g) / 255.0,
+                            f32::from(bg.b) / 255.0,
+                            f32::from(fg.r) / 255.0,
+                            f32::from(fg.g) / 255.0,
+                            f32::from(fg.b) / 255.0,
+                        )
+                    };
+
                     instances.push(CellInstance::background(
-                        px,
-                        py,
-                        cell_w,
-                        cell_h,
-                        f32::from(bg.r) / 255.0,
-                        f32::from(bg.g) / 255.0,
-                        f32::from(bg.b) / 255.0,
+                        px, py, cell_w, cell_h, bg_r, bg_g, bg_b,
                     ));
 
                     if cell.c != ' ' {
-                        let fg = &cell.fg;
                         glyph_requests.push(GlyphRequest {
                             px,
                             py,
                             c: cell.c,
-                            fg_r: f32::from(fg.r) / 255.0,
-                            fg_g: f32::from(fg.g) / 255.0,
-                            fg_b: f32::from(fg.b) / 255.0,
+                            fg_r,
+                            fg_g,
+                            fg_b,
                         });
                     }
                 }
             }
         }
 
-        // Resolve glyph atlas lookups (renderer borrow is separate from panes)
-        let renderer = self.renderer.as_mut().expect("checked above");
+        Self::resolve_glyphs(
+            self.renderer.as_mut().expect("checked above"),
+            &glyph_requests,
+            cell_h,
+            &mut instances,
+        );
+
+        instances
+    }
+
+    /// Resolve glyph atlas lookups and append foreground instances.
+    fn resolve_glyphs(
+        renderer: &mut RenderPipeline,
+        requests: &[GlyphRequest],
+        cell_h: f32,
+        instances: &mut Vec<CellInstance>,
+    ) {
         let font_size = renderer.font_size();
-        for req in &glyph_requests {
+        for req in requests {
             if let Some(glyph) = renderer.get_or_insert_glyph(req.c, font_size)
                 && glyph.width > 0
                 && glyph.height > 0
@@ -463,8 +510,6 @@ impl App {
                 ));
             }
         }
-
-        instances
     }
 
     /// Build a serializable snapshot of the current workspace state.
@@ -946,6 +991,12 @@ impl ApplicationHandler for App {
                 // Throttle expensive MCP context updates (~every 60 frames)
                 if self.frame_count.is_multiple_of(60) {
                     self.update_pane_contexts();
+                }
+
+                // Cursor blink (~every 30 frames ≈ 500ms at 60fps)
+                if self.frame_count.is_multiple_of(30) {
+                    self.cursor_visible = !self.cursor_visible;
+                    self.cells_dirty = true;
                 }
 
                 if self.resize_debouncer.poll().is_some() {
