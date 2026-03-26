@@ -16,6 +16,8 @@ clux-terminal = { path = "../clux-terminal" }
 clux-renderer = { path = "../clux-renderer" }
 clux-layout = { path = "../clux-layout" }
 clux-session = { path = "../clux-session" }
+clux-coord = { path = "../clux-coord" }
+tokio.workspace = true
 
 winit.workspace = true
 wgpu.workspace = true

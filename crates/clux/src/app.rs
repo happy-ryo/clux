@@ -9,6 +9,8 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
+use clux_coord::broker::Broker;
+use clux_coord::mcp_bridge::McpState;
 use clux_layout::pane::{PaneId, Rect};
 use clux_layout::tab::Tab;
 use clux_layout::tree::Direction;
@@ -31,6 +33,9 @@ const DEFAULT_ROWS: u16 = 30;
 
 /// Number of lines to scroll per mouse wheel tick.
 const SCROLL_LINES_PER_TICK: usize = 3;
+
+/// Default port for the embedded MCP server.
+const MCP_DEFAULT_PORT: u16 = 19836;
 
 struct PaneState {
     terminal: ConPty,
@@ -62,10 +67,14 @@ struct App {
     mouse_dragging: bool,
     /// Clipboard handle (lazily initialized).
     clipboard: Option<arboard::Clipboard>,
+    /// Shared MCP coordination state.
+    mcp_state: Option<Arc<McpState>>,
+    /// Tokio runtime for the MCP server.
+    tokio_rt: Arc<tokio::runtime::Runtime>,
 }
 
 impl App {
-    fn new(config: Config) -> Self {
+    fn new(config: Config, tokio_rt: Arc<tokio::runtime::Runtime>) -> Self {
         Self {
             config,
             window: None,
@@ -84,7 +93,88 @@ impl App {
             selection: None,
             mouse_dragging: false,
             clipboard: None,
+            mcp_state: None,
+            tokio_rt,
         }
+    }
+
+    /// Initialize the MCP coordination server.
+    fn start_mcp_server(&mut self) {
+        let db_path = dirs::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("clux")
+            .join("coord.db");
+
+        match Broker::open(&db_path) {
+            Ok(broker) => {
+                let state = Arc::new(McpState {
+                    broker: Arc::new(broker),
+                    pane_contexts: tokio::sync::RwLock::new(HashMap::new()),
+                });
+                let state_clone = Arc::clone(&state);
+                self.tokio_rt.spawn(async move {
+                    match clux_coord::mcp_bridge::start_server(state_clone, MCP_DEFAULT_PORT).await
+                    {
+                        Ok(addr) => info!(%addr, "MCP coordination server started"),
+                        Err(e) => tracing::error!("Failed to start MCP server: {e}"),
+                    }
+                });
+                self.mcp_state = Some(state);
+            }
+            Err(e) => {
+                tracing::error!("Failed to initialize coordination broker: {e}");
+            }
+        }
+    }
+
+    /// Register a pane as a peer in the coordination system.
+    fn register_pane_peer(&self, pane_id: PaneId) {
+        if let Some(ref state) = self.mcp_state {
+            let peer_id = format!("pane-{pane_id}");
+            if let Err(e) = state.broker.register_peer(&peer_id, pane_id) {
+                tracing::error!(pane_id, "Failed to register peer: {e}");
+            }
+        }
+    }
+
+    /// Unregister a pane peer from the coordination system.
+    fn unregister_pane_peer(&self, pane_id: PaneId) {
+        if let Some(ref state) = self.mcp_state {
+            let peer_id = format!("pane-{pane_id}");
+            if let Err(e) = state.broker.unregister_peer(&peer_id) {
+                tracing::error!(pane_id, "Failed to unregister peer: {e}");
+            }
+        }
+    }
+
+    /// Update pane context snapshots for the MCP server.
+    fn update_pane_contexts(&self) {
+        let Some(ref state) = self.mcp_state else {
+            return;
+        };
+        let mut contexts = HashMap::new();
+        for (&pane_id, pane) in &self.panes {
+            let lines = pane.buffer.visible_lines();
+            let text: String = lines
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|cell| cell.c)
+                        .collect::<String>()
+                        .trim_end()
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            contexts.insert(pane_id, text);
+        }
+        // Use blocking write since we're on the main thread
+        self.tokio_rt.spawn({
+            let pane_contexts = Arc::clone(state);
+            async move {
+                *pane_contexts.pane_contexts.write().await = contexts;
+            }
+        });
     }
 
     fn tab(&self) -> &Tab {
@@ -102,6 +192,7 @@ impl App {
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
         self.spawn_pane_for_id(pane_id, DEFAULT_COLS, DEFAULT_ROWS);
+        self.register_pane_peer(pane_id);
         self.auto_saver.notify_change();
         info!(tab_index = self.active_tab, pane_id, "New tab created");
     }
@@ -122,6 +213,7 @@ impl App {
         // Remove all panes (ConPty auto-cleanup via Drop)
         for id in &pane_ids {
             self.panes.remove(id);
+            self.unregister_pane_peer(*id);
         }
 
         let closed_idx = self.active_tab;
@@ -173,6 +265,7 @@ impl App {
         let pane_id = self.tab().active_pane;
         if self.tab_mut().close_pane(pane_id) {
             self.panes.remove(&pane_id);
+            self.unregister_pane_peer(pane_id);
             self.auto_saver.notify_change();
             info!(pane_id, "Pane closed");
         }
@@ -184,6 +277,7 @@ impl App {
         self.tab_mut().split_active_with_id(direction, 0.5, new_id);
         info!(new_pane_id = new_id, ?direction, "Split active pane");
         self.spawn_pane_for_id(new_id, DEFAULT_COLS, DEFAULT_ROWS);
+        self.register_pane_peer(new_id);
         self.auto_saver.notify_change();
         self.resize_all_panes();
     }
@@ -620,6 +714,9 @@ impl ApplicationHandler for App {
         self.renderer = Some(renderer);
         self.window = Some(window);
 
+        // Start the MCP coordination server
+        self.start_mcp_server();
+
         // Create the initial tab with its first pane
         self.create_tab("main");
     }
@@ -662,6 +759,7 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 self.process_terminal_output();
                 self.try_auto_save();
+                self.update_pane_contexts();
 
                 if self.resize_debouncer.poll().is_some() {
                     self.resize_all_panes();
@@ -718,8 +816,16 @@ pub fn run(config: Config) -> Result<()> {
         "Configuration loaded"
     );
 
+    let tokio_rt = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("Failed to create tokio runtime"),
+    );
+
     let event_loop = EventLoop::new()?;
-    let mut app = App::new(config);
+    let mut app = App::new(config, tokio_rt);
     event_loop.run_app(&mut app)?;
     Ok(())
 }

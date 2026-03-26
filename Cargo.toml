@@ -5,6 +5,7 @@ members = [
     "crates/clux-renderer",
     "crates/clux-layout",
     "crates/clux-session",
+    "crates/clux-coord",
 ]
 resolver = "2"
 
@@ -71,6 +72,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Async
 pollster = "0.4"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+
+# HTTP / MCP
+axum = "0.8"
+
+# Database
+rusqlite = { version = "0.33", features = ["bundled"] }
 
 # Error handling
 anyhow = "1"
