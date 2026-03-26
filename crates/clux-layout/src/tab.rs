@@ -69,6 +69,12 @@ impl Tab {
         true
     }
 
+    /// Get the tab name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     /// Access the root layout tree (read-only).
     #[must_use]
     pub fn layout(&self) -> &LayoutNode {
