@@ -3,6 +3,7 @@ members = [
     "crates/clux",
     "crates/clux-terminal",
     "crates/clux-renderer",
+    "crates/clux-layout",
 ]
 resolver = "2"
 
