@@ -52,3 +52,44 @@ impl ResizeDebouncer {
         self.pending.is_some()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread;
+
+    #[test]
+    fn poll_returns_none_before_threshold() {
+        let mut d = ResizeDebouncer::new(100);
+        d.request(80, 24);
+        assert!(d.poll().is_none());
+        assert!(d.has_pending());
+    }
+
+    #[test]
+    fn poll_returns_size_after_threshold() {
+        let mut d = ResizeDebouncer::new(10);
+        d.request(120, 40);
+        thread::sleep(Duration::from_millis(20));
+        assert_eq!(d.poll(), Some((120, 40)));
+        assert!(!d.has_pending());
+    }
+
+    #[test]
+    fn later_request_replaces_earlier() {
+        let mut d = ResizeDebouncer::new(10);
+        d.request(80, 24);
+        d.request(120, 40);
+        thread::sleep(Duration::from_millis(20));
+        assert_eq!(d.poll(), Some((120, 40)));
+    }
+
+    #[test]
+    fn poll_after_consumed_returns_none() {
+        let mut d = ResizeDebouncer::new(10);
+        d.request(80, 24);
+        thread::sleep(Duration::from_millis(20));
+        assert!(d.poll().is_some());
+        assert!(d.poll().is_none());
+    }
+}

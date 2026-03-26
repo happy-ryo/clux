@@ -1,10 +1,10 @@
-use std::io;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
+use std::{io, thread};
 
 use crossbeam_channel::{Receiver, Sender, bounded};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Console::{
     COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole,
@@ -37,17 +37,80 @@ pub type Result<T> = std::result::Result<T, ConPtyError>;
 
 const PSEUDOCONSOLE_RESIZE_QUIRK: u32 = 0x2;
 const PSEUDOCONSOLE_WIN32_INPUT_MODE: u32 = 0x4;
+const PSEUDOCONSOLE_PASSTHROUGH_MODE: u32 = 0x8;
 
-/// Wrapper to make HANDLE Send (HANDLE is a raw pointer, but we manage
-/// thread safety through our channel-based architecture).
+/// Minimum Windows build number required for `PASSTHROUGH_MODE` (Win11 22H2).
+const MIN_BUILD_FOR_PASSTHROUGH: u32 = 22_621;
+
+/// Thread join timeout during shutdown (2 seconds).
+const JOIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Cached result of OS version check for `PASSTHROUGH_MODE` support.
+static PASSTHROUGH_SUPPORTED: LazyLock<bool> = LazyLock::new(supports_passthrough_mode);
+
+// ---------------------------------------------------------------------------
+// OS version detection via RtlGetVersion (raw FFI, no Wdk feature needed)
+// ---------------------------------------------------------------------------
+
+#[repr(C)]
+struct OsVersionInfoW {
+    os_version_info_size: u32,
+    major_version: u32,
+    minor_version: u32,
+    build_number: u32,
+    platform_id: u32,
+    sz_csd_version: [u16; 128],
+}
+
+fn supports_passthrough_mode() -> bool {
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        fn RtlGetVersion(lp_version_information: *mut OsVersionInfoW) -> i32;
+    }
+
+    let mut info: OsVersionInfoW = unsafe { std::mem::zeroed() };
+    info.os_version_info_size = size_of::<OsVersionInfoW>() as u32;
+
+    let status = unsafe { RtlGetVersion(&raw mut info) };
+    // STATUS_SUCCESS == 0
+    if status == 0 {
+        let supported = info.build_number >= MIN_BUILD_FOR_PASSTHROUGH;
+        if supported {
+            info!(build = info.build_number, "PASSTHROUGH_MODE supported");
+        } else {
+            debug!(
+                build = info.build_number,
+                min_build = MIN_BUILD_FOR_PASSTHROUGH,
+                "PASSTHROUGH_MODE not supported"
+            );
+        }
+        supported
+    } else {
+        warn!(status, "RtlGetVersion failed, assuming no PASSTHROUGH_MODE");
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SendableHandle wrapper
+// ---------------------------------------------------------------------------
+
+/// Wrapper to make HANDLE Send. HANDLE is a raw pointer, but we manage
+/// thread safety through our channel-based architecture where each handle
+/// is used exclusively by a single thread.
 struct SendableHandle(HANDLE);
 unsafe impl Send for SendableHandle {}
+
+// ---------------------------------------------------------------------------
+// ConPty
+// ---------------------------------------------------------------------------
 
 /// A `ConPTY` session managing a pseudo console and child process.
 pub struct ConPty {
     console: HPCON,
     process_info: PROCESS_INFORMATION,
-    input_tx: Sender<Vec<u8>>,
+    /// None after shutdown (taken during Drop to close the channel).
+    input_tx: Option<Sender<Vec<u8>>>,
     output_rx: Receiver<Vec<u8>>,
     shutdown: Arc<AtomicBool>,
     read_thread: Option<thread::JoinHandle<()>>,
@@ -68,7 +131,12 @@ impl ConPty {
             X: cols as i16,
             Y: rows as i16,
         };
-        let flags = PSEUDOCONSOLE_RESIZE_QUIRK | PSEUDOCONSOLE_WIN32_INPUT_MODE;
+
+        let mut flags = PSEUDOCONSOLE_RESIZE_QUIRK | PSEUDOCONSOLE_WIN32_INPUT_MODE;
+        if *PASSTHROUGH_SUPPORTED {
+            flags |= PSEUDOCONSOLE_PASSTHROUGH_MODE;
+        }
+
         let console = unsafe {
             CreatePseudoConsole(size, pty_input_read, pty_output_write, flags)
                 .map_err(ConPtyError::ConsoleCreation)?
@@ -90,7 +158,7 @@ impl ConPty {
         let read_thread = thread::Builder::new()
             .name("conpty-read".into())
             .spawn(move || {
-                let h = read_handle; // move entire SendableHandle into closure
+                let h = read_handle;
                 read_loop(h.0, output_tx, read_shutdown);
             })
             .expect("failed to spawn read thread");
@@ -100,7 +168,7 @@ impl ConPty {
         let write_thread = thread::Builder::new()
             .name("conpty-write".into())
             .spawn(move || {
-                let h = write_handle; // move entire SendableHandle into closure
+                let h = write_handle;
                 write_loop(h.0, input_rx, write_shutdown);
             })
             .expect("failed to spawn write thread");
@@ -110,7 +178,7 @@ impl ConPty {
         Ok(ConPty {
             console,
             process_info,
-            input_tx,
+            input_tx: Some(input_tx),
             output_rx,
             shutdown,
             read_thread: Some(read_thread),
@@ -120,7 +188,9 @@ impl ConPty {
 
     /// Send input bytes to the terminal.
     pub fn write(&self, data: &[u8]) {
-        let _ = self.input_tx.send(data.to_vec());
+        if let Some(ref tx) = self.input_tx {
+            let _ = tx.send(data.to_vec());
+        }
     }
 
     /// Try to receive output bytes from the terminal (non-blocking).
@@ -145,24 +215,47 @@ impl ConPty {
         debug!(cols, rows, "ConPTY resized");
         Ok(())
     }
+
+    /// Join a thread handle with a timeout. If the join times out, the thread
+    /// is leaked (it will be cleaned up when the process exits).
+    fn join_with_timeout(handle: thread::JoinHandle<()>, timeout: Duration) {
+        let (done_tx, done_rx) = bounded::<()>(1);
+        let joiner = thread::spawn(move || {
+            let _ = handle.join();
+            let _ = done_tx.send(());
+        });
+        if done_rx.recv_timeout(timeout).is_err() {
+            warn!(?timeout, "Thread join timed out, leaking thread");
+            // Let joiner leak — the OS cleans up on process exit.
+            drop(joiner);
+        }
+    }
 }
 
 impl Drop for ConPty {
     fn drop(&mut self) {
+        // 1. Signal shutdown to threads
         self.shutdown.store(true, Ordering::SeqCst);
-        drop(self.input_tx.clone());
 
+        // 2. Drop the Sender to close the channel, unblocking write_loop's rx.recv()
+        drop(self.input_tx.take());
+
+        // 3. Join write thread (should exit quickly now that channel is closed)
+        if let Some(handle) = self.write_thread.take() {
+            Self::join_with_timeout(handle, JOIN_TIMEOUT);
+        }
+
+        // 4. Close the pseudo console — this causes ReadFile in read_loop to fail
         unsafe {
             ClosePseudoConsole(self.console);
         }
 
+        // 5. Join read thread (should exit now that ReadFile returned an error)
         if let Some(handle) = self.read_thread.take() {
-            let _ = handle.join();
-        }
-        if let Some(handle) = self.write_thread.take() {
-            let _ = handle.join();
+            Self::join_with_timeout(handle, JOIN_TIMEOUT);
         }
 
+        // 6. Close process handles
         unsafe {
             let _ = CloseHandle(self.process_info.hProcess);
             let _ = CloseHandle(self.process_info.hThread);
@@ -171,6 +264,10 @@ impl Drop for ConPty {
         info!("ConPTY session closed");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Helper functions
+// ---------------------------------------------------------------------------
 
 fn create_pipe() -> Result<(HANDLE, HANDLE)> {
     let mut read = HANDLE::default();
@@ -282,5 +379,66 @@ fn write_loop(handle: HANDLE, rx: Receiver<Vec<u8>>, shutdown: Arc<AtomicBool>) 
     }
     unsafe {
         let _ = CloseHandle(handle);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn passthrough_detection_does_not_panic() {
+        let _ = supports_passthrough_mode();
+    }
+
+    #[test]
+    fn spawn_and_drop() {
+        let pty = ConPty::spawn(80, 24, "powershell.exe -NoProfile -Command exit")
+            .expect("failed to spawn ConPty");
+        std::thread::sleep(Duration::from_millis(500));
+        drop(pty);
+        // If we reach here, Drop completed without deadlock
+    }
+
+    #[test]
+    #[ignore = "ConPTY output goes to parent console in test context, verify with cargo run"]
+    fn read_receives_output() {
+        // Verify the ConPTY output pipe delivers data from the child process.
+        // We spawn cmd.exe which produces a banner/prompt, so we should
+        // receive some output without needing to send input.
+        let pty = ConPty::spawn(80, 24, "cmd.exe").expect("failed to spawn ConPty");
+
+        let rx = pty.output_receiver();
+        let mut output = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(data) => {
+                    output.extend_from_slice(&data);
+                    // cmd.exe should produce at least a prompt containing ">"
+                    if !output.is_empty() {
+                        break;
+                    }
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        assert!(
+            !output.is_empty(),
+            "Expected some output from cmd.exe, got nothing"
+        );
+    }
+
+    #[test]
+    fn resize_does_not_error() {
+        let pty = ConPty::spawn(80, 24, "powershell.exe -NoProfile -Command exit")
+            .expect("failed to spawn ConPty");
+        assert!(pty.resize(120, 40).is_ok());
     }
 }
