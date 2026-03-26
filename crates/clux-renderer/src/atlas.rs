@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use cosmic_text::{Attrs, Buffer, FontSystem, Metrics, Shaping, SwashCache, SwashContent};
+use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache, SwashContent};
 use tracing::debug;
 
 /// Information about a rasterized glyph stored in the atlas.
@@ -22,6 +22,14 @@ pub struct GlyphInfo {
     pub offset_x: i32,
     /// Vertical offset from the origin.
     pub offset_y: i32,
+}
+
+/// Default monospace font family for terminal rendering.
+const FONT_FAMILY: &str = "Consolas";
+
+/// Create font attributes with the configured monospace font.
+fn mono_attrs() -> Attrs<'static> {
+    Attrs::new().family(Family::Name(FONT_FAMILY))
 }
 
 /// Row-based packing state for the glyph atlas.
@@ -97,7 +105,7 @@ impl GlyphAtlas {
     /// Returns `(cell_width, cell_height)` in logical pixels.
     pub fn measure_cell_size(&mut self, font_size: f32) -> (f32, f32) {
         let metrics = Metrics::new(font_size, font_size * 1.2);
-        let attrs = Attrs::new();
+        let attrs = mono_attrs();
 
         // Measure a representative character ('M' is typically full-width in monospace)
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
@@ -186,7 +194,7 @@ impl GlyphAtlas {
     /// Rasterize a character, returning `(pixel_data, width, height, offset_x, offset_y)`.
     fn rasterize_char(&mut self, c: char, font_size: f32) -> (Vec<u8>, u32, u32, i32, i32) {
         let metrics = Metrics::new(font_size, font_size * 1.2);
-        let attrs = Attrs::new();
+        let attrs = mono_attrs();
 
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
         buffer.set_text(
