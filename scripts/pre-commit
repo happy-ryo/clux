@@ -1,0 +1,16 @@
+#!/bin/sh
+# clux pre-commit hook
+# Install: git config core.hooksPath scripts
+
+set -e
+
+echo "==> Running cargo fmt --check..."
+cargo fmt --check
+
+echo "==> Running cargo clippy..."
+cargo clippy --all-targets -- -D warnings
+
+echo "==> Running cargo build..."
+cargo build
+
+echo "==> All pre-commit checks passed."
