@@ -16,6 +16,7 @@ use clux_coord::panel::CoordPanel;
 use clux_layout::pane::{PaneId, Rect};
 use clux_layout::tab::Tab;
 use clux_layout::tree::Direction;
+use clux_renderer::cell_renderer::CellInstance;
 use clux_renderer::pipeline::RenderPipeline;
 use clux_session::auto_save::AutoSaver;
 use clux_session::state::{PaneSnapshot, SessionState, TabState};
@@ -49,6 +50,16 @@ struct PaneState {
 
 const SESSION_NAME: &str = "default";
 
+/// A pending glyph to resolve from the atlas after collecting all cells.
+struct GlyphRequest {
+    px: f32,
+    py: f32,
+    c: char,
+    fg_r: f32,
+    fg_g: f32,
+    fg_b: f32,
+}
+
 struct App {
     config: Config,
     window: Option<Arc<Window>>,
@@ -77,6 +88,14 @@ struct App {
     coord_panel: Option<CoordPanel>,
     /// Tokio runtime for the MCP server.
     tokio_rt: Arc<tokio::runtime::Runtime>,
+    /// Cached cell instances for rendering (rebuilt only when dirty).
+    cached_cells: Vec<CellInstance>,
+    /// Whether the cell cache needs rebuilding.
+    cells_dirty: bool,
+    /// Frame counter for throttling expensive operations.
+    frame_count: u64,
+    /// Whether the cursor is currently visible (for blinking).
+    cursor_visible: bool,
 }
 
 impl App {
@@ -102,6 +121,10 @@ impl App {
             mcp_state: None,
             coord_panel: None,
             tokio_rt,
+            cached_cells: Vec::new(),
+            cells_dirty: true,
+            frame_count: 0,
+            cursor_visible: true,
         }
     }
 
@@ -238,6 +261,7 @@ impl App {
     fn switch_tab(&mut self, index: usize) {
         if index < self.tabs.len() && index != self.active_tab {
             self.active_tab = index;
+            self.cells_dirty = true;
             info!(active = index, "Switched to tab");
             self.resize_all_panes();
         }
@@ -293,6 +317,7 @@ impl App {
 
     fn process_terminal_output(&mut self) {
         let mut newly_detected: Vec<PaneId> = Vec::new();
+        let mut any_output = false;
 
         for (&pane_id, pane) in &mut self.panes {
             let had_output = {
@@ -312,6 +337,9 @@ impl App {
                 }
                 received
             };
+            if had_output {
+                any_output = true;
+            }
             // Reset scroll offset when new output arrives (user is at live view)
             if had_output && pane.buffer.scroll_offset > 0 {
                 pane.buffer.reset_scroll();
@@ -320,6 +348,10 @@ impl App {
             if pane.claude_detector.detected && !pane.claude_detector.config_injected {
                 newly_detected.push(pane_id);
             }
+        }
+
+        if any_output {
+            self.cells_dirty = true;
         }
 
         // Inject MCP config for newly detected Claude Code panes
@@ -351,6 +383,132 @@ impl App {
             Rect::new(0.0, 0.0, size.width as f32, size.height as f32)
         } else {
             Rect::new(0.0, 0.0, 800.0, 600.0)
+        }
+    }
+
+    /// Build the list of cell instances for GPU rendering from all visible panes.
+    fn build_cell_instances(&mut self) -> Vec<CellInstance> {
+        if self.renderer.is_none() {
+            return Vec::new();
+        }
+
+        let viewport = self.viewport();
+        let pane_rects = self.tabs[self.active_tab].all_pane_rects(viewport);
+        let cell_w = self.cell_width * self.scale_factor as f32;
+        let cell_h = self.cell_height * self.scale_factor as f32;
+        // Estimate capacity: 2 instances per cell (bg + fg) for all visible cells
+        let estimated = pane_rects
+            .iter()
+            .map(|(id, _)| {
+                self.panes
+                    .get(id)
+                    .map_or(0, |p| p.buffer.cols * p.buffer.rows * 2)
+            })
+            .sum();
+        let mut instances = Vec::with_capacity(estimated);
+        let mut glyph_requests: Vec<GlyphRequest> = Vec::new();
+
+        let active_pane_id = self.tabs[self.active_tab].active_pane;
+
+        for (pane_id, rect) in &pane_rects {
+            let Some(pane) = self.panes.get(pane_id) else {
+                continue;
+            };
+            let cursor_col = pane.buffer.cursor.col;
+            let cursor_row = pane.buffer.cursor.row;
+            let is_active = *pane_id == active_pane_id;
+            // Only show cursor when at live view (not scrolled back)
+            let show_cursor = is_active && pane.buffer.scroll_offset == 0 && self.cursor_visible;
+
+            let visible = pane.buffer.visible_lines();
+            for (row_idx, row) in visible.iter().enumerate() {
+                for (col_idx, cell) in row.iter().enumerate() {
+                    let px = rect.x + col_idx as f32 * cell_w;
+                    let py = rect.y + row_idx as f32 * cell_h;
+
+                    // Cursor: invert colors at cursor position
+                    let at_cursor = show_cursor && col_idx == cursor_col && row_idx == cursor_row;
+
+                    let (bg_r, bg_g, bg_b, fg_r, fg_g, fg_b) = if at_cursor {
+                        // Invert: use foreground color as background, background as foreground
+                        let fg = &cell.fg;
+                        let bg = &cell.bg;
+                        (
+                            f32::from(fg.r) / 255.0,
+                            f32::from(fg.g) / 255.0,
+                            f32::from(fg.b) / 255.0,
+                            f32::from(bg.r) / 255.0,
+                            f32::from(bg.g) / 255.0,
+                            f32::from(bg.b) / 255.0,
+                        )
+                    } else {
+                        let bg = &cell.bg;
+                        let fg = &cell.fg;
+                        (
+                            f32::from(bg.r) / 255.0,
+                            f32::from(bg.g) / 255.0,
+                            f32::from(bg.b) / 255.0,
+                            f32::from(fg.r) / 255.0,
+                            f32::from(fg.g) / 255.0,
+                            f32::from(fg.b) / 255.0,
+                        )
+                    };
+
+                    instances.push(CellInstance::background(
+                        px, py, cell_w, cell_h, bg_r, bg_g, bg_b,
+                    ));
+
+                    if cell.c != ' ' {
+                        glyph_requests.push(GlyphRequest {
+                            px,
+                            py,
+                            c: cell.c,
+                            fg_r,
+                            fg_g,
+                            fg_b,
+                        });
+                    }
+                }
+            }
+        }
+
+        Self::resolve_glyphs(
+            self.renderer.as_mut().expect("checked above"),
+            &glyph_requests,
+            cell_h,
+            &mut instances,
+        );
+
+        instances
+    }
+
+    /// Resolve glyph atlas lookups and append foreground instances.
+    fn resolve_glyphs(
+        renderer: &mut RenderPipeline,
+        requests: &[GlyphRequest],
+        cell_h: f32,
+        instances: &mut Vec<CellInstance>,
+    ) {
+        let font_size = renderer.font_size();
+        for req in requests {
+            if let Some(glyph) = renderer.get_or_insert_glyph(req.c, font_size)
+                && glyph.width > 0
+                && glyph.height > 0
+            {
+                instances.push(CellInstance::glyph(
+                    req.px + glyph.offset_x as f32,
+                    req.py + (cell_h - glyph.offset_y as f32),
+                    glyph.width as f32,
+                    glyph.height as f32,
+                    req.fg_r,
+                    req.fg_g,
+                    req.fg_b,
+                    glyph.u,
+                    glyph.v,
+                    glyph.uv_w,
+                    glyph.uv_h,
+                ));
+            }
         }
     }
 
@@ -751,6 +909,7 @@ impl App {
                 } else {
                     pane.buffer.scroll_view_down(count);
                 }
+                self.cells_dirty = true;
             }
         }
     }
@@ -825,12 +984,30 @@ impl ApplicationHandler for App {
                 self.request_redraw();
             }
             WindowEvent::RedrawRequested => {
+                self.frame_count += 1;
                 self.process_terminal_output();
                 self.try_auto_save();
-                self.update_pane_contexts();
+
+                // Throttle expensive MCP context updates (~every 60 frames)
+                if self.frame_count.is_multiple_of(60) {
+                    self.update_pane_contexts();
+                }
+
+                // Cursor blink (~every 30 frames ≈ 500ms at 60fps)
+                if self.frame_count.is_multiple_of(30) {
+                    self.cursor_visible = !self.cursor_visible;
+                    self.cells_dirty = true;
+                }
 
                 if self.resize_debouncer.poll().is_some() {
                     self.resize_all_panes();
+                    self.cells_dirty = true;
+                }
+
+                // Only rebuild cell instances when content changed
+                if self.cells_dirty {
+                    self.cached_cells = self.build_cell_instances();
+                    self.cells_dirty = false;
                 }
 
                 if let Some(ref mut renderer) = self.renderer {
@@ -841,8 +1018,7 @@ impl ApplicationHandler for App {
                         b: f64::from(bg_color[2]),
                         a: 1.0,
                     };
-                    // TODO: build CellInstance list from all pane buffers + tab bar
-                    if let Err(e) = renderer.render_frame(bg, &[]) {
+                    if let Err(e) = renderer.render_frame(bg, &self.cached_cells) {
                         tracing::error!("Render error: {e}");
                     }
                 }

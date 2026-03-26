@@ -26,6 +26,74 @@ pub struct CellInstance {
     pad2: f32,
 }
 
+impl CellInstance {
+    /// Create a background fill instance (solid color quad).
+    #[allow(clippy::many_single_char_names)]
+    pub fn background(
+        pos_x: f32,
+        pos_y: f32,
+        size_x: f32,
+        size_y: f32,
+        red: f32,
+        green: f32,
+        blue: f32,
+    ) -> Self {
+        Self {
+            pos_x,
+            pos_y,
+            size_x,
+            size_y,
+            color_r: red,
+            color_g: green,
+            color_b: blue,
+            color_a: 1.0,
+            uv_x: 0.0,
+            uv_y: 0.0,
+            uv_w: 0.0,
+            uv_h: 0.0,
+            mode: 0.0,
+            pad0: 0.0,
+            pad1: 0.0,
+            pad2: 0.0,
+        }
+    }
+
+    /// Create a foreground glyph instance (textured quad from atlas).
+    #[allow(clippy::too_many_arguments)]
+    pub fn glyph(
+        pos_x: f32,
+        pos_y: f32,
+        size_x: f32,
+        size_y: f32,
+        red: f32,
+        green: f32,
+        blue: f32,
+        uv_x: f32,
+        uv_y: f32,
+        uv_w: f32,
+        uv_h: f32,
+    ) -> Self {
+        Self {
+            pos_x,
+            pos_y,
+            size_x,
+            size_y,
+            color_r: red,
+            color_g: green,
+            color_b: blue,
+            color_a: 1.0,
+            uv_x,
+            uv_y,
+            uv_w,
+            uv_h,
+            mode: 1.0,
+            pad0: 0.0,
+            pad1: 0.0,
+            pad2: 0.0,
+        }
+    }
+}
+
 /// Uniforms sent to the GPU: screen dimensions for NDC conversion.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]

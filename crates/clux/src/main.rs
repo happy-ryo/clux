@@ -1,3 +1,7 @@
+// Use Windows subsystem to prevent a console window from appearing.
+// The terminal runs inside ConPTY, not in the host console.
+#![windows_subsystem = "windows"]
+
 mod app;
 pub mod config;
 pub mod selection;
