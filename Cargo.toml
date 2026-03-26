@@ -4,6 +4,7 @@ members = [
     "crates/clux-terminal",
     "crates/clux-renderer",
     "crates/clux-layout",
+    "crates/clux-session",
 ]
 resolver = "2"
 
@@ -63,6 +64,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Async
 pollster = "0.4"
+
+# Directories
+dirs = "6"
 
 # Error handling
 anyhow = "1"
