@@ -2,9 +2,8 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::Json;
-use axum::Router;
 use axum::routing::post;
+use axum::{Json, Router};
 use tokio::sync::RwLock;
 use tracing::{error, info};
 
