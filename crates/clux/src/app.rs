@@ -13,6 +13,8 @@ use clux_layout::pane::{PaneId, Rect};
 use clux_layout::tab::Tab;
 use clux_layout::tree::Direction;
 use clux_renderer::pipeline::RenderPipeline;
+use clux_session::auto_save::AutoSaver;
+use clux_session::state::{PaneSnapshot, SessionState, TabState};
 use clux_terminal::buffer::TerminalBuffer;
 use clux_terminal::conpty::ConPty;
 use clux_terminal::input::key_event_to_bytes;
@@ -30,6 +32,8 @@ struct PaneState {
     vt_parser: vte::Parser,
 }
 
+const SESSION_NAME: &str = "default";
+
 struct App {
     window: Option<Arc<Window>>,
     renderer: Option<RenderPipeline>,
@@ -37,6 +41,7 @@ struct App {
     active_tab: usize,
     panes: HashMap<PaneId, PaneState>,
     resize_debouncer: ResizeDebouncer,
+    auto_saver: AutoSaver,
     cell_width: f32,
     cell_height: f32,
     scale_factor: f64,
@@ -55,6 +60,7 @@ impl App {
             active_tab: 0,
             panes: HashMap::new(),
             resize_debouncer: ResizeDebouncer::new(50),
+            auto_saver: AutoSaver::default_debounce(),
             cell_width: DEFAULT_CELL_WIDTH,
             cell_height: DEFAULT_CELL_HEIGHT,
             scale_factor: 1.0,
@@ -79,6 +85,7 @@ impl App {
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
         self.spawn_pane_for_id(pane_id, DEFAULT_COLS, DEFAULT_ROWS);
+        self.auto_saver.notify_change();
         info!(tab_index = self.active_tab, pane_id, "New tab created");
     }
 
@@ -106,6 +113,7 @@ impl App {
         if self.active_tab >= self.tabs.len() {
             self.active_tab = self.tabs.len() - 1;
         }
+        self.auto_saver.notify_change();
         info!(closed = closed_idx, active = self.active_tab, "Tab closed");
         self.resize_all_panes();
     }
@@ -145,6 +153,7 @@ impl App {
         let pane_id = self.tab().active_pane;
         if self.tab_mut().close_pane(pane_id) {
             self.panes.remove(&pane_id);
+            self.auto_saver.notify_change();
             info!(pane_id, "Pane closed");
         }
     }
@@ -155,6 +164,7 @@ impl App {
         self.tab_mut().split_active_with_id(direction, 0.5, new_id);
         info!(new_pane_id = new_id, ?direction, "Split active pane");
         self.spawn_pane_for_id(new_id, DEFAULT_COLS, DEFAULT_ROWS);
+        self.auto_saver.notify_change();
         self.resize_all_panes();
     }
 
@@ -182,6 +192,52 @@ impl App {
             Rect::new(0.0, 0.0, size.width as f32, size.height as f32)
         } else {
             Rect::new(0.0, 0.0, 800.0, 600.0)
+        }
+    }
+
+    /// Build a serializable snapshot of the current workspace state.
+    fn build_session_state(&self) -> SessionState {
+        let tabs = self.tabs.iter().map(TabState::from).collect();
+        let viewport = self.viewport();
+        let panes = self
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.all_pane_rects(viewport))
+            .filter_map(|(pane_id, rect)| {
+                self.panes.get(&pane_id).map(|_pane| {
+                    let (cols, rows) = pixel_size_to_terminal_size(
+                        rect.width as u32,
+                        rect.height as u32,
+                        self.cell_width,
+                        self.cell_height,
+                        self.scale_factor,
+                    );
+                    PaneSnapshot {
+                        pane_id,
+                        cwd: None, // CWD discovery is not yet implemented
+                        shell: "pwsh.exe".to_string(),
+                        cols,
+                        rows,
+                    }
+                })
+            })
+            .collect();
+
+        SessionState {
+            name: SESSION_NAME.to_string(),
+            active_tab: self.active_tab,
+            tabs,
+            panes,
+        }
+    }
+
+    /// Perform an auto-save if the debounce timer has elapsed.
+    fn try_auto_save(&mut self) {
+        if self.auto_saver.poll_save() {
+            let state = self.build_session_state();
+            if let Err(e) = clux_session::store::save(&state) {
+                tracing::error!("Auto-save failed: {e}");
+            }
         }
     }
 
@@ -300,6 +356,10 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => {
                 info!("Window close requested");
+                // Force-save session before exiting.
+                self.auto_saver.notify_change();
+                self.auto_saver.force_save();
+                self.try_auto_save();
                 event_loop.exit();
             }
             WindowEvent::Resized(physical_size) => {
@@ -329,6 +389,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 self.process_terminal_output();
+                self.try_auto_save();
 
                 if self.resize_debouncer.poll().is_some() {
                     self.resize_all_panes();

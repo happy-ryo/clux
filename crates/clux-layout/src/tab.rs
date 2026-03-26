@@ -69,6 +69,12 @@ impl Tab {
         true
     }
 
+    /// Access the root layout tree (read-only).
+    #[must_use]
+    pub fn layout(&self) -> &LayoutNode {
+        &self.root
+    }
+
     /// Compute rects for all panes given a viewport.
     #[must_use]
     pub fn all_pane_rects(&self, viewport: Rect) -> Vec<(PaneId, Rect)> {
