@@ -40,6 +40,9 @@ const SCROLL_LINES_PER_TICK: usize = 3;
 /// Default port for the embedded MCP server.
 const MCP_DEFAULT_PORT: u16 = 19836;
 
+/// Height of the tab bar in pixels.
+const TAB_BAR_HEIGHT: f32 = 24.0;
+
 struct PaneState {
     terminal: ConPty,
     buffer: TerminalBuffer,
@@ -377,13 +380,95 @@ impl App {
         }
     }
 
+    /// Viewport for pane content (below the tab bar).
     fn viewport(&self) -> Rect {
         if let Some(ref window) = self.window {
             let size = window.inner_size();
-            Rect::new(0.0, 0.0, size.width as f32, size.height as f32)
+            let bar_h = TAB_BAR_HEIGHT * self.scale_factor as f32;
+            Rect::new(0.0, bar_h, size.width as f32, size.height as f32 - bar_h)
         } else {
-            Rect::new(0.0, 0.0, 800.0, 600.0)
+            let bar_h = TAB_BAR_HEIGHT;
+            Rect::new(0.0, bar_h, 800.0, 600.0 - bar_h)
         }
+    }
+
+    /// Full window size including the tab bar area.
+    fn window_size(&self) -> (f32, f32) {
+        if let Some(ref window) = self.window {
+            let size = window.inner_size();
+            (size.width as f32, size.height as f32)
+        } else {
+            (800.0, 600.0)
+        }
+    }
+
+    /// Build cell instances for the tab bar.
+    fn build_tab_bar_instances(&mut self) -> Vec<CellInstance> {
+        let (win_w, _) = self.window_size();
+        let bar_h = TAB_BAR_HEIGHT * self.scale_factor as f32;
+        let cell_w = self.cell_width * self.scale_factor as f32;
+        let cell_h = self.cell_height * self.scale_factor as f32;
+        let mut instances = Vec::new();
+
+        // Tab bar background
+        instances.push(CellInstance::background(
+            0.0, 0.0, win_w, bar_h, 0.15, 0.15, 0.22,
+        ));
+
+        // Render tab labels
+        let mut x_offset: f32 = 4.0;
+        let renderer = self.renderer.as_mut().expect("renderer initialized");
+        let font_size = renderer.font_size();
+
+        for (idx, tab) in self.tabs.iter().enumerate() {
+            let label = tab.name();
+            let is_active = idx == self.active_tab;
+
+            // Tab background (highlight active)
+            let tab_width = (label.len() as f32 + 2.0) * cell_w;
+            let (bg_r, bg_g, bg_b) = if is_active {
+                (0.25, 0.25, 0.38)
+            } else {
+                (0.15, 0.15, 0.22)
+            };
+            instances.push(CellInstance::background(
+                x_offset, 0.0, tab_width, bar_h, bg_r, bg_g, bg_b,
+            ));
+
+            // Tab text
+            let text_y = (bar_h - cell_h) / 2.0;
+            let mut char_x = x_offset + cell_w;
+            for c in label.chars() {
+                if let Some(glyph) = renderer.get_or_insert_glyph(c, font_size)
+                    && glyph.width > 0
+                    && glyph.height > 0
+                {
+                    let (fg_r, fg_g, fg_b) = if is_active {
+                        (0.95, 0.95, 0.95)
+                    } else {
+                        (0.6, 0.6, 0.7)
+                    };
+                    instances.push(CellInstance::glyph(
+                        char_x + glyph.offset_x as f32,
+                        text_y + (cell_h - glyph.offset_y as f32),
+                        glyph.width as f32,
+                        glyph.height as f32,
+                        fg_r,
+                        fg_g,
+                        fg_b,
+                        glyph.u,
+                        glyph.v,
+                        glyph.uv_w,
+                        glyph.uv_h,
+                    ));
+                }
+                char_x += cell_w;
+            }
+
+            x_offset += tab_width + 2.0;
+        }
+
+        instances
     }
 
     /// Build the list of cell instances for GPU rendering from all visible panes.
@@ -808,13 +893,47 @@ impl App {
     }
 
     /// Handle mouse button press/release for focus and text selection.
+    /// Check if a click is in the tab bar and switch tabs accordingly.
+    /// Returns true if the click was handled by the tab bar.
+    fn handle_tab_bar_click(&mut self, x: f32, y: f32) -> bool {
+        let bar_h = TAB_BAR_HEIGHT * self.scale_factor as f32;
+        if y >= bar_h {
+            return false;
+        }
+
+        let cell_w = self.cell_width * self.scale_factor as f32;
+        let mut x_offset: f32 = 4.0;
+
+        for (idx, tab) in self.tabs.iter().enumerate() {
+            let tab_width = (tab.name().len() as f32 + 2.0) * cell_w;
+            if x >= x_offset && x < x_offset + tab_width {
+                if idx != self.active_tab {
+                    self.active_tab = idx;
+                    self.cells_dirty = true;
+                    info!(active = idx, "Tab switched via click");
+                    self.resize_all_panes();
+                }
+                return true;
+            }
+            x_offset += tab_width + 2.0;
+        }
+
+        true // Click was in tab bar area even if not on a tab
+    }
+
     fn handle_mouse_input(&mut self, state: ElementState, button: MouseButton) {
         if button != MouseButton::Left {
             return;
         }
         if state == ElementState::Pressed {
-            let viewport = self.viewport();
             let (x, y) = self.cursor_position;
+
+            // Check tab bar first
+            if self.handle_tab_bar_click(x as f32, y as f32) {
+                return;
+            }
+
+            let viewport = self.viewport();
             if self.tab_mut().focus_at(x as f32, y as f32, viewport) {
                 info!(
                     active = self.tab().active_pane,
@@ -1006,7 +1125,9 @@ impl ApplicationHandler for App {
 
                 // Only rebuild cell instances when content changed
                 if self.cells_dirty {
-                    self.cached_cells = self.build_cell_instances();
+                    let mut cells = self.build_tab_bar_instances();
+                    cells.append(&mut self.build_cell_instances());
+                    self.cached_cells = cells;
                     self.cells_dirty = false;
                 }
 
