@@ -1056,11 +1056,18 @@ impl ApplicationHandler for App {
 
         self.scale_factor = window.scale_factor();
 
-        let renderer = pollster::block_on(RenderPipeline::new(Arc::clone(&window)))
+        let mut renderer = pollster::block_on(RenderPipeline::new(Arc::clone(&window)))
             .expect("Failed to initialize GPU renderer");
+
+        // Measure actual cell dimensions from the font instead of using hardcoded defaults
+        let (measured_w, measured_h) = renderer.measure_cell_size();
+        self.cell_width = measured_w;
+        self.cell_height = measured_h;
 
         info!(
             scale_factor = self.scale_factor,
+            cell_width = self.cell_width,
+            cell_height = self.cell_height,
             "Window and GPU renderer initialized"
         );
 
