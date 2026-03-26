@@ -126,6 +126,16 @@ impl RenderPipeline {
         &self.queue
     }
 
+    /// Look up or insert a glyph in the atlas, returning its info.
+    /// This avoids borrow conflicts by accessing atlas and queue together.
+    pub fn get_or_insert_glyph(
+        &mut self,
+        c: char,
+        font_size: f32,
+    ) -> Option<crate::atlas::GlyphInfo> {
+        self.glyph_atlas.get_or_insert(c, font_size, &self.queue)
+    }
+
     pub fn render_frame(&mut self, clear_color: wgpu::Color, cells: &[CellInstance]) -> Result<()> {
         let output = self.surface.get_current_texture()?;
         let view = output

@@ -16,6 +16,7 @@ use clux_coord::panel::CoordPanel;
 use clux_layout::pane::{PaneId, Rect};
 use clux_layout::tab::Tab;
 use clux_layout::tree::Direction;
+use clux_renderer::cell_renderer::CellInstance;
 use clux_renderer::pipeline::RenderPipeline;
 use clux_session::auto_save::AutoSaver;
 use clux_session::state::{PaneSnapshot, SessionState, TabState};
@@ -352,6 +353,91 @@ impl App {
         } else {
             Rect::new(0.0, 0.0, 800.0, 600.0)
         }
+    }
+
+    /// Build the list of cell instances for GPU rendering from all visible panes.
+    fn build_cell_instances(&mut self) -> Vec<CellInstance> {
+        if self.renderer.is_none() {
+            return Vec::new();
+        }
+
+        let viewport = self.viewport();
+        let pane_rects = self.tabs[self.active_tab].all_pane_rects(viewport);
+        let cell_w = self.cell_width * self.scale_factor as f32;
+        let cell_h = self.cell_height * self.scale_factor as f32;
+        let mut instances = Vec::new();
+
+        struct GlyphRequest {
+            px: f32,
+            py: f32,
+            c: char,
+            fg_r: f32,
+            fg_g: f32,
+            fg_b: f32,
+        }
+        let mut glyph_requests: Vec<GlyphRequest> = Vec::new();
+
+        for (pane_id, rect) in &pane_rects {
+            let Some(pane) = self.panes.get(pane_id) else {
+                continue;
+            };
+            let visible = pane.buffer.visible_lines();
+            for (row_idx, row) in visible.iter().enumerate() {
+                for (col_idx, cell) in row.iter().enumerate() {
+                    let px = rect.x + col_idx as f32 * cell_w;
+                    let py = rect.y + row_idx as f32 * cell_h;
+
+                    let bg = &cell.bg;
+                    instances.push(CellInstance::background(
+                        px,
+                        py,
+                        cell_w,
+                        cell_h,
+                        f32::from(bg.r) / 255.0,
+                        f32::from(bg.g) / 255.0,
+                        f32::from(bg.b) / 255.0,
+                    ));
+
+                    if cell.c != ' ' {
+                        let fg = &cell.fg;
+                        glyph_requests.push(GlyphRequest {
+                            px,
+                            py,
+                            c: cell.c,
+                            fg_r: f32::from(fg.r) / 255.0,
+                            fg_g: f32::from(fg.g) / 255.0,
+                            fg_b: f32::from(fg.b) / 255.0,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Resolve glyph atlas lookups (renderer borrow is separate from panes)
+        let renderer = self.renderer.as_mut().expect("checked above");
+        let font_size = renderer.font_size();
+        for req in &glyph_requests {
+            if let Some(glyph) = renderer.get_or_insert_glyph(req.c, font_size)
+                && glyph.width > 0
+                && glyph.height > 0
+            {
+                instances.push(CellInstance::glyph(
+                    req.px + glyph.offset_x as f32,
+                    req.py + (cell_h - glyph.offset_y as f32),
+                    glyph.width as f32,
+                    glyph.height as f32,
+                    req.fg_r,
+                    req.fg_g,
+                    req.fg_b,
+                    glyph.u,
+                    glyph.v,
+                    glyph.uv_w,
+                    glyph.uv_h,
+                ));
+            }
+        }
+
+        instances
     }
 
     /// Build a serializable snapshot of the current workspace state.
@@ -833,6 +919,7 @@ impl ApplicationHandler for App {
                     self.resize_all_panes();
                 }
 
+                let cells = self.build_cell_instances();
                 if let Some(ref mut renderer) = self.renderer {
                     let bg_color = &self.config.colors.background;
                     let bg = wgpu::Color {
@@ -841,8 +928,7 @@ impl ApplicationHandler for App {
                         b: f64::from(bg_color[2]),
                         a: 1.0,
                     };
-                    // TODO: build CellInstance list from all pane buffers + tab bar
-                    if let Err(e) = renderer.render_frame(bg, &[]) {
+                    if let Err(e) = renderer.render_frame(bg, &cells) {
                         tracing::error!("Render error: {e}");
                     }
                 }
